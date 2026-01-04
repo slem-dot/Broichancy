@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 """
 SlsurveyBot — نسخة نهائية احترافية (مستخدم + أدمن) + اشتراك إجباري
@@ -79,7 +80,9 @@ HISTORY_FILE  = os.path.join(DATA_DIR, "history.json")
 ADMINLOG_FILE = os.path.join(DATA_DIR, "admin_log.json")
 BANS_FILE     = os.path.join(DATA_DIR, "bans.json")
 SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
-EISH_FILE     = os.path.join(DATA_DIR, "eishancy_accounts.json")  # {uid:{username,password,created_at}}
+EISH_FILE     = os.path.join(DATA_DIR, "eishancy_accounts.json")
+EISH_POOL_FILE = os.path.join(DATA_DIR, "eishancy_pool.json")  # list of {username,password,status,assigned_to,assigned_at}
+REF_FILE       = os.path.join(DATA_DIR, "referrals.json")      # {referrer_id: {points:int, referrals:int, referred:[uids]}}  # {uid:{username,password,created_at}}
 
 DEFAULT_SETTINGS = {
     "syriatel_code": "23547",
@@ -94,6 +97,7 @@ DEFAULT_SETTINGS = {
 # =========================
 BTN_EISHANCY = "حساب ايشانسي"
 BTN_BALANCE  = "رصيدي"
+BTN_REFERRALS = "🎁 الإحالات"
 BTN_BACK     = "رجوع للقائمة الرئيسية"
 
 BTN_CREATE   = "إنشاء حساب"
@@ -145,6 +149,8 @@ def _ensure_data_files():
         (BANS_FILE, {}),
         (SETTINGS_FILE, DEFAULT_SETTINGS),
         (EISH_FILE, {}),
+        (EISH_POOL_FILE, []),
+        (REF_FILE, {}),
         (USERS_FILE, {}),  # {uid: {username, first_name, last_name, joined_at, last_seen, active}}
         (ADMINS_FILE, {"super_admin": int(SUPER_ADMIN_ID), "admins": [int(SUPER_ADMIN_ID)]}),
     ]
@@ -258,6 +264,9 @@ def upsert_user_profile(user) -> None:
         cur = {
             "user_id": uid,
             "joined_at": now,
+            "points": 0,
+            "referrals": 0,
+            "referred_by": None,
         }
     cur.update({
         "user_id": uid,
@@ -287,6 +296,54 @@ def set_user_active(uid: int) -> None:
     cur["last_seen"] = int(time.time())
     users[key] = cur
     _save_json(USERS_FILE, users)
+
+
+# =========================
+# Referrals (points)
+# =========================
+def _ref_obj() -> Dict[str, Any]:
+    return _load_json(REF_FILE)
+
+def get_points(uid: int) -> int:
+    users = _load_json(USERS_FILE)
+    return int(users.get(str(uid), {}).get("points", 0) or 0)
+
+def add_points(uid: int, delta: int) -> None:
+    users = _load_json(USERS_FILE)
+    key = str(uid)
+    cur = users.get(key, {"user_id": uid, "joined_at": int(time.time())})
+    cur["points"] = max(0, int(cur.get("points", 0) or 0) + int(delta))
+    users[key] = cur
+    _save_json(USERS_FILE, users)
+
+def add_referral(referrer_id: int, referred_id: int) -> bool:
+    """Grant referral once per referred user. Returns True if granted."""
+    if referrer_id == referred_id:
+        return False
+    users = _load_json(USERS_FILE)
+    rkey = str(referred_id)
+    cur = users.get(rkey)
+    if not cur:
+        # should exist, but be safe
+        cur = {"user_id": referred_id, "joined_at": int(time.time()), "points": 0, "referrals": 0, "referred_by": None}
+    if cur.get("referred_by") is not None:
+        return False
+    # mark referred_by
+    cur["referred_by"] = int(referrer_id)
+    users[rkey] = cur
+    _save_json(USERS_FILE, users)
+    # grant points to referrer
+    users2 = _load_json(USERS_FILE)
+    fkey = str(referrer_id)
+    fcur = users2.get(fkey, {"user_id": referrer_id, "joined_at": int(time.time()), "points": 0, "referrals": 0, "referred_by": None})
+    fcur["points"] = int(fcur.get("points", 0) or 0) + 10
+    fcur["referrals"] = int(fcur.get("referrals", 0) or 0) + 1
+    users2[fkey] = fcur
+    _save_json(USERS_FILE, users2)
+    return True
+
+def referral_link(bot_username: str, uid: int) -> str:
+    return f"https://t.me/{bot_username}?start=ref_{uid}"
 
 # =========================
 # Admins (multi-admin)
@@ -637,7 +694,8 @@ async def on_channel_member_update(update: Update, context: ContextTypes.DEFAULT
 # =========================
 def kb_main():
     return ReplyKeyboardMarkup(
-        [[KeyboardButton(BTN_EISHANCY), KeyboardButton(BTN_BALANCE)]],
+        [[KeyboardButton(BTN_EISHANCY), KeyboardButton(BTN_BALANCE)],
+         [KeyboardButton(BTN_REFERRALS)]],
         resize_keyboard=True
     )
 
@@ -694,9 +752,33 @@ def ik_admin_home():
          InlineKeyboardButton("⚙️ إعدادات", callback_data="AD:SETTINGS")],
         [InlineKeyboardButton("👥 سجل المشتركين", callback_data="AD:USERS:0"),
          InlineKeyboardButton("📣 رسالة جماعية", callback_data="AD:BCAST")],
+        [InlineKeyboardButton("🗂 مخزون إيـشانسي", callback_data="AD:EPOOL")],
         [InlineKeyboardButton("🧾 تصدير مختصر", callback_data="AD:EXPORT")]
     ])
 
+
+def ik_copy_creds():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 نسخ اسم المستخدم", callback_data="CP:U"),
+         InlineKeyboardButton("📋 نسخ كلمة المرور", callback_data="CP:P")],
+        [InlineKeyboardButton("⬅️ رجوع", callback_data="EISH:MENU")]
+    ])
+
+def ik_suggest_accept():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ موافق", callback_data="EISH:ACCEPT"),
+         InlineKeyboardButton("✏️ اكتب اسم آخر", callback_data="EISH:RETRY")],
+        [InlineKeyboardButton("⬅️ رجوع", callback_data="EISH:MENU")]
+    ])
+
+def ik_epool_home():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ إضافة حسابات بالجملة", callback_data="AD:EPOOL:ADD"),
+         InlineKeyboardButton("📋 المتاح", callback_data="AD:EPOOL:AVAIL")],
+        [InlineKeyboardButton("📦 الموزع", callback_data="AD:EPOOL:ASSIGNED"),
+         InlineKeyboardButton("📊 إحصائيات المخزون", callback_data="AD:EPOOL:STATS")],
+        [InlineKeyboardButton("⬅️ رجوع", callback_data="AD:HOME")]
+    ])
 def ik_admin_back():
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ رجوع", callback_data="AD:HOME")]])
 
@@ -736,15 +818,31 @@ def msg_support() -> str:
 # User handlers
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard_user(update, context):
-        return ConversationHandler.END
+            if not await guard_user(update, context):
+                return ConversationHandler.END
 
-    context.user_data.clear()
-    await update.message.reply_text(
+            # referral payload: /start ref_<uid>
+            try:
+                args = getattr(context, "args", []) or []
+                if args:
+                    payload = args[0]
+                    if isinstance(payload, str) and payload.startswith("ref_"):
+                        ref_uid = int(payload.split("_", 1)[1])
+                        granted = add_referral(ref_uid, update.effective_user.id)
+                        if granted:
+                            try:
+                                await context.bot.send_message(chat_id=ref_uid, text="🎉 لديك إحالة جديدة! تم إضافة 10 نقاط إلى رصيد نقاطك.")
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+            context.user_data.clear()
+            await update.message.reply_text(
         "أهلًا وسهلاً بكم في بوت الخدمات 👋\nاختر أحد الخيارات من الأسفل:",
-        reply_markup=kb_main()
-    )
-    return ST_MAIN
+                reply_markup=kb_main()
+            )
+            return ST_MAIN
 
 async def go_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await guard_user(update, context):
@@ -813,6 +911,26 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == BTN_BALANCE:
         return await show_balance_menu(update, context)
 
+    if text == BTN_REFERRALS:
+        uid = update.effective_user.id
+        bot_user = (await context.bot.get_me()).username
+        pts = get_points(uid)
+        link = referral_link(bot_user, uid)
+        msg = (
+            f"🎁 نظام الإحالات\n\n"
+            f"⭐ نقاطك الحالية: {pts}\n"
+            f"🎯 كل إحالة = 10 نقاط\n"
+            f"💳 عند 100 نقطة يمكنك الاستبدال بـ 10000\n\n"
+            f"🔗 رابط الإحالة الخاص بك:\n{link}"
+        )
+        # show redeem button if eligible
+        if pts >= 100:
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ استبدال 100 نقطة = 10000", callback_data="RF:REDEEM")]])
+            await update.message.reply_text(msg, reply_markup=kb)
+        else:
+            await update.message.reply_text(msg, reply_markup=kb_main())
+        return ST_MAIN
+
     await update.message.reply_text("❌ الرجاء اختيار خيار صحيح", reply_markup=kb_main())
     return ST_MAIN
 
@@ -842,7 +960,7 @@ async def eish_choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if get_eish(uid):
             await update.message.reply_text("⚠️ لديك حساب إيـشانسي محفوظ بالفعل ولا يمكنك إنشاء أكثر من حساب.", reply_markup=kb_eish_actions())
             return ST_EISH_ACTION
-        await update.message.reply_text("✅ اكتب اسم المستخدم المقترح:", reply_markup=kb_back())
+        await update.message.reply_text("✅ اكتب اسم المستخدم المطلوب (مثال: bro_ahmad22):", reply_markup=kb_back())
         return ST_E_USER
 
     if text == BTN_E_TOPUP:
@@ -860,6 +978,10 @@ async def eish_choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data["amount_min"] = 1
         await update.message.reply_text("اكتب المبلغ المطلوب سحبه من إيـشانسي (بالأرقام فقط):", reply_markup=kb_back())
         return ST_AMOUNT
+
+    if text == "🌐 موقع iChancy":
+        await update.message.reply_text("🔗 رابط الموقع الرسمي:\nhttps://www.ichancy.com", reply_markup=kb_eish_actions())
+        return ST_EISH_ACTION
 
     # حذف حساب إيـشانسي (يسمح للمستخدم بحذف حسابه المحفوظ)
     if text == BTN_E_DEL:
@@ -886,6 +1008,7 @@ async def eish_get_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await guard_user(update, context):
         return ConversationHandler.END
 
+    uid = update.effective_user.id
     text = safe_text(update.message.text)
     if text == BTN_BACK:
         return await go_home(update, context)
@@ -893,11 +1016,72 @@ async def eish_get_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ اسم المستخدم غير صالح، حاول مجددًا.")
         return ST_E_USER
 
-    context.user_data["username"] = text
-    await update.message.reply_text("اكتب كلمة المرور المقترحة:", reply_markup=kb_back())
-    return ST_E_PASS
+    # Validate format: prefix + number (example: bro_ahmad22)
+    pref, num = _parse_prefix_num(text)
+    if not pref:
+        await update.message.reply_text(
+            "❌ الاسم غير مطابق للصيغة المطلوبة.\n"
+            "يرجى اختيار اسم مثل:\n"
+            "bro_ahmad22\n"
+            "bro_omar10\n\n"
+            "اكتب اسم مستخدم جديد:",
+            reply_markup=kb_back()
+        )
+        return ST_E_USER
+
+    if get_eish(uid):
+        await update.message.reply_text(
+            "⚠️ لديك حساب إيـشانسي محفوظ بالفعل ولا يمكنك إنشاء أكثر من حساب.",
+            reply_markup=kb_eish_actions()
+        )
+        return ST_EISH_ACTION
+
+    assigned = await assign_pool_account(uid, text)
+    if assigned:
+        save_eish(uid, assigned["username"], assigned["password"])
+        context.user_data["last_username"] = assigned["username"]
+        context.user_data["last_password"] = assigned["password"]
+        await update.message.reply_text(
+            "✅ تم تجهيز حسابك بنجاح:\n\n"
+            f"```\nUsername: {assigned['username']}\nPassword: {assigned['password']}\n```",
+            parse_mode="Markdown",
+            reply_markup=ik_copy_creds()
+        )
+        return ST_EISH_ACTION
+
+    sug = suggest_pool_account(text)
+    if not sug:
+        pool = _load_pool()
+        examples = [a.get("username") for a in pool if a.get("status") == "available" and isinstance(a.get("username"), str)]
+        examples = [e for e in examples if e][:3]
+        ex_txt = "\n".join(examples) if examples else "bro_ahmad22\nbro_omar10"
+        await update.message.reply_text(
+            "❌ الاسم الذي اخترته غير متوفر حاليًا.\n\n"
+            "يرجى اختيار اسم مطابق للأسماء المتاحة، على سبيل المثال:\n"
+            f"{ex_txt}\n\n"
+            "اكتب اسم مستخدم جديد:",
+            reply_markup=kb_back()
+        )
+        return ST_E_USER
+
+    context.user_data["suggest_username"] = sug["username"]
+    await update.message.reply_text(
+        "❌ الاسم الذي أدخلته غير متوفر حاليًا.\n\n"
+        f"✅ نقترح عليك هذا الحساب المتاح:\n{sug['username']}\n\n"
+        "هل تريد اعتماده؟",
+        reply_markup=ik_suggest_accept()
+    )
+    return ST_E_USER
 
 async def eish_get_pass(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Password is now auto-assigned from the iChancy pool.
+    await update.message.reply_text(
+        "✅ النظام الجديد لا يطلب كلمة مرور. اختر (إنشاء حساب) وأدخل اسم المستخدم فقط.",
+        reply_markup=kb_eish_actions()
+    )
+    return ST_EISH_ACTION
+
+async def eish_topup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await guard_user(update, context):
         return ConversationHandler.END
 
@@ -1446,6 +1630,48 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("لوحة الأدمن ✅", reply_markup=ik_admin_home())
         return
 
+    if data == "AD:EPOOL":
+        await q.message.reply_text("🗂 إدارة مخزون حسابات إيـشانسي", reply_markup=ik_epool_home())
+        return
+
+    if data.startswith("AD:EPOOL:"):
+        sub = data.split(":", 2)[2]
+        if sub == "ADD":
+            context.user_data["admin_mode"] = "EPOOL_ADD"
+            await q.message.reply_text(
+                "➕ أرسل الحسابات بالجملة بهذا الشكل (سطر لكل حساب):\n"
+                "username:password\n\n"
+                "مثال:\n"
+                "bro_ahmad22:bbb123bb\n"
+                "bro_omar10:pass999\n",
+                reply_markup=ik_admin_back()
+            )
+            return
+        if sub == "STATS":
+            st = pool_stats()
+            await q.message.reply_text(
+                f"📊 إحصائيات المخزون\n\n"
+                f"إجمالي: {st['total']}\n"
+                f"متاح: {st['available']}\n"
+                f"موزع: {st['assigned']}",
+                reply_markup=ik_epool_home()
+            )
+            return
+        if sub in ("AVAIL","ASSIGNED"):
+            pool = _load_pool()
+            want = "available" if sub == "AVAIL" else "assigned"
+            items = [a for a in pool if a.get("status")==want]
+            lines = []
+            for a in items[:40]:
+                if want=="available":
+                    lines.append(f"- {a.get('username')}")
+                else:
+                    lines.append(f"- {a.get('username')} -> {a.get('assigned_to')}")
+            body = "\n".join(lines) if lines else "لا يوجد."
+            title = "📋 الحسابات المتاحة" if want=="available" else "📦 الحسابات الموزعة"
+            await q.message.reply_text(title + "\n\n" + body, reply_markup=ik_epool_home())
+            return
+
     if data.startswith("AD:PENDING:"):
         page = int(data.split(":")[-1])
         s = get_settings()
@@ -1950,6 +2176,20 @@ async def admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not mode:
         return
 
+    if mode == "EPOOL_ADD":
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        res = add_pool_bulk(lines)
+        context.user_data.pop("admin_mode", None)
+        st = pool_stats()
+        await update.message.reply_text(
+            f"✅ تم تحديث المخزون.\n\n"
+            f"مضاف: {res['added']}\n"
+            f"متجاهل/مكرر: {res['skipped']}\n\n"
+            f"📊 الآن: إجمالي {st['total']} | متاح {st['available']} | موزع {st['assigned']}",
+            reply_markup=ik_admin_home()
+        )
+        return
+
     if mode.startswith("EDITCREATE:"):
         order_id = mode.split(":", 1)[1]
         order = get_order(order_id)
@@ -2203,3 +2443,88 @@ def main():
 
 if __name__ == "__main__":
     main()
+# =========================
+# Eishancy pool (pre-created accounts)
+# =========================
+_POOL_LOCK = asyncio.Lock()
+
+def _load_pool() -> List[Dict[str, Any]]:
+    data = _load_json(EISH_POOL_FILE)
+    if isinstance(data, list):
+        return data
+    return []
+
+def _save_pool(pool: List[Dict[str, Any]]) -> None:
+    _save_json(EISH_POOL_FILE, pool)
+
+def pool_stats() -> Dict[str, int]:
+    pool = _load_pool()
+    available = sum(1 for a in pool if a.get("status") == "available")
+    assigned = sum(1 for a in pool if a.get("status") == "assigned")
+    return {"total": len(pool), "available": available, "assigned": assigned}
+
+def add_pool_bulk(lines: List[str]) -> Dict[str, int]:
+    """lines: ['user:pass', ...]"""
+    pool = _load_pool()
+    existing = { (a.get("username") or "").lower() for a in pool }
+    added=0
+    skipped=0
+    for ln in lines:
+        ln=ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        if ":" not in ln:
+            skipped += 1
+            continue
+        u,p = ln.split(":",1)
+        u=u.strip()
+        p=p.strip()
+        if not u or not p:
+            skipped += 1
+            continue
+        if u.lower() in existing:
+            skipped += 1
+            continue
+        pool.append({"username": u, "password": p, "status": "available", "assigned_to": None, "assigned_at": None})
+        existing.add(u.lower())
+        added += 1
+    _save_pool(pool)
+    return {"added": added, "skipped": skipped}
+
+def _parse_prefix_num(s: str):
+    m = re.match(r"^([a-zA-Z_]+)(\d+)$", s)
+    if not m:
+        return None, None
+    return m.group(1), int(m.group(2))
+
+def suggest_pool_account(desired_username: str) -> Dict[str, Any] | None:
+    """Return best available account dict (not reserved)."""
+    pool = _load_pool()
+    pref, num = _parse_prefix_num(desired_username)
+    if not pref:
+        return None
+    candidates = [a for a in pool if a.get("status") == "available" and str(a.get("username","")).startswith(pref)]
+    if not candidates:
+        return None
+    # compute closest by number if possible; else first
+    def keyfn(a):
+        ap, an = _parse_prefix_num(str(a.get("username","")))
+        if an is None:
+            return (10**9, str(a.get("username","")))
+        return (abs(an - num), an)
+    candidates.sort(key=keyfn)
+    return candidates[0]
+
+async def assign_pool_account(uid: int, username: str) -> Dict[str, Any] | None:
+    async with _POOL_LOCK:
+        pool = _load_pool()
+        # find exact available username
+        for a in pool:
+            if str(a.get("username","")) == username and a.get("status") == "available":
+                a["status"] = "assigned"
+                a["assigned_to"] = int(uid)
+                a["assigned_at"] = int(time.time())
+                _save_pool(pool)
+                return a
+        return None
+
