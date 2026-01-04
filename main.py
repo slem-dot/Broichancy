@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 """
 SlsurveyBot — نسخة نهائية احترافية (مستخدم + أدمن) + اشتراك إجباري
@@ -2527,4 +2526,5 @@ async def assign_pool_account(uid: int, username: str) -> Dict[str, Any] | None:
                 _save_pool(pool)
                 return a
         return None
+
 
