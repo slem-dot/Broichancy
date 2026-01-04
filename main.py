@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 """
 SlsurveyBot — نسخة نهائية احترافية (مستخدم + أدمن) + اشتراك إجباري
@@ -1576,6 +1575,98 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 # Admin callback
 # =========================
+# =========================
+# User callback (suggestion accept + copy + redeem)
+# =========================
+async def user_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q:
+        return
+    data = (q.data or "").strip()
+    await q.answer()
+
+    uid = q.from_user.id
+
+    # Copy creds (send as plain message so user can copy)
+    if data == "CP:U":
+        u = (context.user_data.get("last_username") or "").strip()
+        if u:
+            await q.message.reply_text(u)
+        return
+
+    if data == "CP:P":
+        p = (context.user_data.get("last_password") or "").strip()
+        if p:
+            await q.message.reply_text(p)
+        return
+
+    # Referral redeem
+    if data == "RF:REDEEM":
+        pts = get_points(uid)
+        if pts < 100:
+            await q.message.reply_text("⚠️ نقاطك غير كافية للاستبدال حالياً. تحتاج إلى 100 نقطة.")
+            return
+        # Redeem: -100 points, +10000 to bot balance
+        add_points(uid, -100)
+        try:
+            adjust_wallet(uid, delta_balance=+10000)
+        except Exception:
+            # rollback points if wallet failed for any reason
+            add_points(uid, +100)
+            await q.message.reply_text("❌ حدث خطأ أثناء الاستبدال. حاول لاحقاً.")
+            return
+        b, h = get_wallet(uid)
+        await q.message.reply_text(f"✅ تم الاستبدال بنجاح!\n+10000 إلى رصيد البوت.\n\nرصيدك الآن: {b}\n⏳ محجوز: {h}")
+        return
+
+    # Suggestion flow (auto pool)
+    if data == "EISH:MENU":
+        await q.message.reply_text("اختر الإجراء الذي تريد تنفيذه:", reply_markup=kb_eish_actions())
+        return
+
+    if data == "EISH:RETRY":
+        context.user_data.pop("suggest_username", None)
+        await q.message.reply_text("✏️ اكتب اسم مستخدم جديد:", reply_markup=kb_back())
+        return
+
+    if data == "EISH:ACCEPT":
+        sug = (context.user_data.get("suggest_username") or "").strip()
+        if not sug:
+            await q.message.reply_text("⚠️ لا يوجد اقتراح حاليًا. اكتب اسم مستخدم جديد:", reply_markup=kb_back())
+            return
+        if get_eish(uid):
+            context.user_data.pop("suggest_username", None)
+            await q.message.reply_text("⚠️ لديك حساب إيـشانسي محفوظ بالفعل.", reply_markup=kb_eish_actions())
+            return
+
+        assigned = await assign_pool_account(uid, sug)
+        if not assigned:
+            # Maybe taken; propose another one
+            new_sug = suggest_pool_account(sug)
+            if not new_sug:
+                context.user_data.pop("suggest_username", None)
+                await q.message.reply_text("❌ لا يوجد حسابات متاحة حالياً. حاول لاحقاً.", reply_markup=kb_eish_actions())
+                return
+            context.user_data["suggest_username"] = new_sug["username"]
+            await q.message.reply_text(
+                "⚠️ تم حجز الحساب المقترح من مستخدم آخر.\n\n"                f"✅ نقترح عليك هذا الحساب المتاح:\n{new_sug['username']}\n\n"                "هل تريد اعتماده؟",
+                reply_markup=ik_suggest_accept()
+            )
+            return
+
+        set_eish(uid, assigned["username"], assigned["password"])
+        context.user_data["last_username"] = assigned["username"]
+        context.user_data["last_password"] = assigned["password"]
+        context.user_data.pop("suggest_username", None)
+
+        await q.message.reply_text(
+            "✅ تم تجهيز حسابك بنجاح:\n\n"
+            f"```\nUsername: {assigned['username']}\nPassword: {assigned['password']}\n```",
+            parse_mode="Markdown",
+            reply_markup=ik_copy_creds()
+        )
+        return
+
 async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not q:
@@ -2475,6 +2566,7 @@ def build_app():
     app.add_handler(CommandHandler("admin", cmd_admin))
 
     # ✅ نخلي admin_cb يستقبل فقط كولباكات الأدمن الخاصة
+    app.add_handler(CallbackQueryHandler(user_cb, pattern=r"^(EISH:|CP:|RF:)"))
     app.add_handler(CallbackQueryHandler(admin_cb, pattern=r"^(AD:|OD:)"))
 
     
