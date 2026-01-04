@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 """
 SlsurveyBot — نسخة نهائية احترافية (مستخدم + أدمن) + اشتراك إجباري
@@ -29,6 +30,8 @@ pip install python-telegram-bot==21.6
 import json
 import os
 import time
+import asyncio
+import re
 from typing import Dict, Any, Optional, List, Tuple
 
 from telegram import (
@@ -103,6 +106,7 @@ BTN_CREATE   = "إنشاء حساب"
 BTN_E_TOPUP  = "شحن حساب ايشانسي"
 BTN_E_WITH   = "سحب من حساب ايشانسي"
 BTN_E_DEL    = "حذف حساب ايشانسي"
+BTN_EISH_SITE = "🌐 موقع iChancy"
 
 BTN_BOT_TOPUP    = "شحن رصيد في البوت"
 BTN_BOT_WITHDRAW = "سحب رصيد من البوت"
@@ -706,6 +710,7 @@ def kb_eish_actions():
         [
             [KeyboardButton(BTN_CREATE), KeyboardButton(BTN_E_TOPUP)],
             [KeyboardButton(BTN_E_WITH), KeyboardButton(BTN_E_DEL)],
+            [KeyboardButton(BTN_EISH_SITE)],
             [KeyboardButton(BTN_BACK)]
         ],
         resize_keyboard=True
@@ -758,8 +763,8 @@ def ik_admin_home():
 
 def ik_copy_creds():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 نسخ اسم المستخدم", callback_data="CP:U"),
-         InlineKeyboardButton("📋 نسخ كلمة المرور", callback_data="CP:P")],
+        [InlineKeyboardButton("📋 نسخ اسم المستخدم", callback_data="COPY:USER"),
+         InlineKeyboardButton("📋 نسخ كلمة المرور", callback_data="COPY:PASS")],
         [InlineKeyboardButton("⬅️ رجوع", callback_data="EISH:MENU")]
     ])
 
@@ -978,7 +983,7 @@ async def eish_choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("اكتب المبلغ المطلوب سحبه من إيـشانسي (بالأرقام فقط):", reply_markup=kb_back())
         return ST_AMOUNT
 
-    if text == "🌐 موقع iChancy":
+    if text == BTN_EISH_SITE:
         await update.message.reply_text("🔗 رابط الموقع الرسمي:\nhttps://www.ichancy.com", reply_markup=kb_eish_actions())
         return ST_EISH_ACTION
 
@@ -1037,7 +1042,7 @@ async def eish_get_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     assigned = await assign_pool_account(uid, text)
     if assigned:
-        save_eish(uid, assigned["username"], assigned["password"])
+        set_eish(uid, assigned["username"], assigned["password"])
         context.user_data["last_username"] = assigned["username"]
         context.user_data["last_password"] = assigned["password"]
         await update.message.reply_text(
@@ -1336,50 +1341,9 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     flow = context.user_data.get("flow")
     user = update.effective_user
-
-    # إنشاء حساب إيـشانسي
-    if flow == "eishancy" and context.user_data.get("action") == BTN_CREATE:
-        if get_eish(uid):
-            context.user_data.clear()
-            await update.message.reply_text('⚠️ لديك حساب إيـشانسي محفوظ بالفعل.', reply_markup=kb_main())
-            return ST_MAIN
-
-        order_id = make_order_id("EISC")
-        username = safe_text(context.user_data.get("username"))
-        password = safe_text(context.user_data.get("password"))
-
-        order = {
-            "order_id": order_id,
-            "type": "eish_create",
-            "status": "pending",
-            "user_id": uid,
-            "username": user.username or "",
-            "eish_username": username,
-            "eish_password": password,
-            "created_at": int(time.time()),
-        }
-        add_order(order)
-
-        if rollback_order_if_exceeds_pending(uid, order_id):
-            context.user_data.clear()
-            await update.message.reply_text("⚠️ لديك طلب معلّق بالفعل. تم إلغاء الطلب الجديد.", reply_markup=kb_main())
-            return ST_MAIN
-
-        add_history(uid, {"ts": int(time.time()), "event": "created", "type": "eish_create", "order_id": order_id, "amount": 0})
-
-        admin_msg = (
-            "📩 طلب إنشاء حساب إيـشانسي:\n"
-            f"OrderID: {order_id}\n"
-            f"UserID: {uid}\n"
-            f"Username المقترح: {username}\n"
-            f"Password المقترحة: {password}\n\n"
-            "يمكنك تعديل البيانات ثم قبول/رفض."
-        )
-        await notify_admins(context, text=admin_msg, reply_markup=ik_order_actions(order_id, allow_edit=True), order_id=order_id)
-
-        context.user_data.clear()
-        await update.message.reply_text(msg_pending_notice(), reply_markup=kb_main())
-        return ST_MAIN
+    # إنشاء حساب إيـشانسي (مخزون تلقائي)
+    # تم استبدال النظام القديم (طلب للأدمن) بنظام مخزون حسابات.
+    # المستخدم يحصل على الحساب فورًا من المخزون داخل eish_get_user / user_cb.
 
 
     # حذف حساب إيـشانسي
@@ -1608,81 +1572,6 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.user_data.pop("admin_mode", None)
     await update.message.reply_text("لوحة الأدمن ✅", reply_markup=ik_admin_home())
-
-
-# =========================
-# User callback (copy + suggestion accept)
-# =========================
-from telegram.ext import ApplicationHandlerStop
-
-async def user_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    if not q:
-        return
-    data = q.data or ""
-    await q.answer()
-
-    uid = q.from_user.id
-
-    # Copy credentials buttons
-    if data == "COPY:USER":
-        u = (context.user_data.get("last_username") or "")
-        if u:
-            await q.message.reply_text(f"{u}")
-        return
-
-    if data == "COPY:PASS":
-        p = (context.user_data.get("last_password") or "")
-        if p:
-            await q.message.reply_text(f"{p}")
-        return
-
-    # iChancy suggested username accept/retry/menu
-    if data == "EISH:MENU":
-        # just show actions menu
-        await q.message.reply_text("اختر من القائمة:", reply_markup=kb_eish_actions())
-        return
-
-    if data == "EISH:RETRY":
-        context.user_data.pop("suggest_username", None)
-        await q.message.reply_text("اكتب اسم مستخدم جديد:", reply_markup=kb_back())
-        return
-
-    if data == "EISH:ACCEPT":
-        sug = context.user_data.get("suggest_username")
-        if not sug:
-            await q.message.reply_text("⚠️ لا يوجد اقتراح حاليًا. اكتب اسم مستخدم جديد:", reply_markup=kb_back())
-            return
-        if get_eish(uid):
-            await q.message.reply_text("⚠️ لديك حساب إيـشانسي محفوظ بالفعل.", reply_markup=kb_eish_actions())
-            context.user_data.pop("suggest_username", None)
-            return
-        assigned = await assign_pool_account(uid, sug)
-        if not assigned:
-            # someone else took it, suggest again
-            new_sug = suggest_pool_account(sug)
-            if not new_sug:
-                await q.message.reply_text("❌ لا يوجد حسابات متاحة حاليًا. حاول لاحقًا.", reply_markup=kb_eish_actions())
-                context.user_data.pop("suggest_username", None)
-                return
-            context.user_data["suggest_username"] = new_sug["username"]
-            await q.message.reply_text(
-                "⚠️ تم حجز الحساب المقترح من مستخدم آخر.\n\n"
-                f"✅ نقترح عليك هذا الحساب المتاح:\n{new_sug['username']}\n\n"
-                "هل تريد اعتماده؟",
-                reply_markup=ik_suggest_accept()
-            )
-            return
-        save_eish(uid, assigned["username"], assigned["password"])
-        context.user_data["last_username"] = assigned["username"]
-        context.user_data["last_password"] = assigned["password"]
-        await q.message.reply_text(
-            "✅ تم تجهيز حسابك بنجاح:\n\n"            f"```\nUsername: {assigned['username']}\nPassword: {assigned['password']}\n```",
-            parse_mode="Markdown",
-            reply_markup=ik_copy_creds()
-        )
-        context.user_data.pop("suggest_username", None)
-        return
 
 # =========================
 # Admin callback
@@ -1957,10 +1846,9 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🧾 Eishancy: {e_name}\n"
             f"🚫 Banned: {banned}\nReason: {reason or '-'}\n\n"
             "أوامر تحكم:\nADJ +1000 سبب\nADJ -500 سبب\nBAN السبب\nUNBAN\nHIST",
-            reply_markup=ik_epool_home()
+            reply_markup=ik_admin_home()
         )
-        raise ApplicationHandlerStop
-
+        return
 
     if data == "AD:STATS":
         orders = list_orders()
@@ -1978,10 +1866,9 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ مرفوض: {rejected}\n\n"
             f"💰 مجموع Balance: {total_balance}\n"
             f"⏳ مجموع Hold: {total_hold}",
-            reply_markup=ik_epool_home()
+            reply_markup=ik_admin_home()
         )
-        raise ApplicationHandlerStop
-
+        return
 
     if data == "AD:SETTINGS":
         s = get_settings()
@@ -1995,10 +1882,9 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"- Admin Page Size: {s['admin_page_size']}\n\n"
             "لتعديلها أرسل:\n"
             "SET syriatel_code=23547 min_topup=15000 min_withdraw=50000 max_pending=1 admin_page_size=6",
-            reply_markup=ik_epool_home()
+            reply_markup=ik_admin_home()
         )
-        raise ApplicationHandlerStop
-
+        return
 
     if data == "AD:EXPORT":
         s = get_settings()
@@ -2007,10 +1893,9 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"required_channel={REQUIRED_CHANNEL}\n"
             f"settings={s}\n"
             "files=[balances.json, orders.json, history.json, bans.json, admin_log.json, eishancy_accounts.json]",
-            reply_markup=ik_epool_home()
+            reply_markup=ik_admin_home()
         )
-        raise ApplicationHandlerStop
-
+        return
 
     
     if data == "AD:BCAST":
@@ -2080,10 +1965,9 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✏️ أرسل البيانات الجديدة بهذا الشكل:\n"
             "username password\n\n"
             "مثال:\nSleman123 Pass@123",
-            reply_markup=ik_epool_home()
+            reply_markup=ik_admin_home()
         )
-        raise ApplicationHandlerStop
-
+        return
 
     # قبول/رفض
     if data.startswith("OD:APPROVE:") or data.startswith("OD:REJECT:"):
@@ -2224,10 +2108,9 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🧾 Eishancy: {e_name}\n"
             f"🚫 Banned: {banned}\nReason: {reason or '-'}\n\n"
             "أوامر تحكم:\nADJ +1000 سبب\nADJ -500 سبب\nBAN السبب\nUNBAN\nHIST",
-            reply_markup=ik_epool_home()
+            reply_markup=ik_admin_home()
         )
-        raise ApplicationHandlerStop
-
+        return
 
     if data.startswith("OD:HIST:"):
         order_id = data.split(":")[2]
@@ -2266,10 +2149,9 @@ async def admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"مضاف: {res['added']}\n"
             f"متجاهل/مكرر: {res['skipped']}\n\n"
             f"📊 الآن: إجمالي {st['total']} | متاح {st['available']} | موزع {st['assigned']}",
-            reply_markup=ik_epool_home()
+            reply_markup=ik_admin_home()
         )
-        raise ApplicationHandlerStop
-
+        return
 
     if mode.startswith("EDITCREATE:"):
         order_id = mode.split(":", 1)[1]
@@ -2395,10 +2277,9 @@ async def admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🧾 Eishancy: {e_name}\n"
             f"🚫 Banned: {banned}\nReason: {reason or '-'}\n\n"
             "أوامر:\nADJ +1000 سبب\nADJ -500 سبب\nBAN السبب\nUNBAN\nHIST",
-            reply_markup=ik_epool_home()
+            reply_markup=ik_admin_home()
         )
-        raise ApplicationHandlerStop
-
+        return
 
     if mode.startswith("USERCTX:"):
         uid = int(mode.split(":")[1])
@@ -2462,70 +2343,6 @@ async def admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ℹ️ أمر غير معروف. استخدم: ADJ / BAN / UNBAN / HIST", reply_markup=ik_admin_home())
         return
 
-# =========================
-# Build app
-# =========================
-def build_app():
-    _ensure_data_files()
-    get_settings()
-
-    app = ApplicationBuilder().token(TOKEN).build()
-
-    # استثناء رسائل الأدمن من محادثة المستخدم حتى لا تتعارض مع أوامر لوحة الأدمن
-    user_text_filter = (filters.TEXT & ~filters.COMMAND & ~filters.User(ADMIN_ID))
-
-    # ✅ زر (تحقق من الاشتراك)
-    app.add_handler(CallbackQueryHandler(cb_check_join, pattern=f"^{CB_CHECK_JOIN}$"))
-
-    # Conversation
-    user_conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            ST_MAIN: [MessageHandler(user_text_filter, smart_router)],
-            ST_EISH_ACTION: [MessageHandler(user_text_filter, eish_choose_action)],
-            ST_E_USER: [MessageHandler(user_text_filter, eish_get_user)],
-            ST_E_PASS: [MessageHandler(user_text_filter, eish_get_pass)],
-            ST_BAL_MENU: [MessageHandler(user_text_filter, balance_menu)],
-            ST_TOPUP_METHOD: [MessageHandler(user_text_filter, topup_choose_method)],
-            ST_TOPUP_TXID: [MessageHandler(user_text_filter, topup_get_txid)],
-            ST_WITHDRAW_METHOD: [MessageHandler(user_text_filter, withdraw_choose_method)],
-            ST_WITHDRAW_NUMBER: [MessageHandler(user_text_filter, withdraw_get_number)],
-            ST_AMOUNT: [MessageHandler(user_text_filter, get_amount)],
-            ST_CONFIRM: [MessageHandler(user_text_filter, confirm)],
-        },
-        fallbacks=[
-            CommandHandler("start", start),
-            MessageHandler(filters.Regex(f"^{BTN_BACK}$") & ~filters.User(ADMIN_ID), go_home),
-        ],
-        allow_reentry=True,
-    )
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text), group=0)
-
-    app.add_handler(user_conv, group=1)
-
-    # Admin
-    app.add_handler(CommandHandler("admin", cmd_admin))
-
-    # ✅ نخلي admin_cb يستقبل فقط كولباكات الأدمن الخاصة
-    app.add_handler(CallbackQueryHandler(user_cb, pattern=r"^(EISH:|COPY:)"))
-    app.add_handler(CallbackQueryHandler(admin_cb, pattern=r"^(AD:|OD:)"))
-
-    
-    # (اختياري) حدث ترك القناة — يحتاج البوت أدمن بالقناة
-    app.add_handler(ChatMemberHandler(on_channel_member_update, ChatMemberHandler.CHAT_MEMBER))
-
-    return app
-
-def main():
-    if TOKEN == "PUT_YOUR_BOT_TOKEN_HERE" or not TOKEN.strip():
-        print("ضع توكن البوت داخل BOT_TOKEN (env) أو داخل TOKEN في الكود.")
-        return
-    app = build_app()
-    print("البوت يعمل الآن...")
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
 # =========================
 # Eishancy pool (pre-created accounts)
 # =========================
@@ -2610,3 +2427,69 @@ async def assign_pool_account(uid: int, username: str) -> Dict[str, Any] | None:
                 _save_pool(pool)
                 return a
         return None
+
+
+
+# =========================
+# Build app
+# =========================
+def build_app():
+    _ensure_data_files()
+    get_settings()
+
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    # استثناء رسائل الأدمن من محادثة المستخدم حتى لا تتعارض مع أوامر لوحة الأدمن
+    user_text_filter = (filters.TEXT & ~filters.COMMAND & ~filters.User(ADMIN_ID))
+
+    # ✅ زر (تحقق من الاشتراك)
+    app.add_handler(CallbackQueryHandler(cb_check_join, pattern=f"^{CB_CHECK_JOIN}$"))
+
+    # Conversation
+    user_conv = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            ST_MAIN: [MessageHandler(user_text_filter, smart_router)],
+            ST_EISH_ACTION: [MessageHandler(user_text_filter, eish_choose_action)],
+            ST_E_USER: [MessageHandler(user_text_filter, eish_get_user)],
+            ST_E_PASS: [MessageHandler(user_text_filter, eish_get_pass)],
+            ST_BAL_MENU: [MessageHandler(user_text_filter, balance_menu)],
+            ST_TOPUP_METHOD: [MessageHandler(user_text_filter, topup_choose_method)],
+            ST_TOPUP_TXID: [MessageHandler(user_text_filter, topup_get_txid)],
+            ST_WITHDRAW_METHOD: [MessageHandler(user_text_filter, withdraw_choose_method)],
+            ST_WITHDRAW_NUMBER: [MessageHandler(user_text_filter, withdraw_get_number)],
+            ST_AMOUNT: [MessageHandler(user_text_filter, get_amount)],
+            ST_CONFIRM: [MessageHandler(user_text_filter, confirm)],
+        },
+        fallbacks=[
+            CommandHandler("start", start),
+            MessageHandler(filters.Regex(f"^{BTN_BACK}$") & ~filters.User(ADMIN_ID), go_home),
+        ],
+        allow_reentry=True,
+    )
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text), group=0)
+
+    app.add_handler(user_conv, group=1)
+
+    # Admin
+    app.add_handler(CommandHandler("admin", cmd_admin))
+
+    # ✅ نخلي admin_cb يستقبل فقط كولباكات الأدمن الخاصة
+    app.add_handler(CallbackQueryHandler(admin_cb, pattern=r"^(AD:|OD:)"))
+
+    
+    # (اختياري) حدث ترك القناة — يحتاج البوت أدمن بالقناة
+    app.add_handler(ChatMemberHandler(on_channel_member_update, ChatMemberHandler.CHAT_MEMBER))
+
+    return app
+
+def main():
+    if TOKEN == "PUT_YOUR_BOT_TOKEN_HERE" or not TOKEN.strip():
+        print("ضع توكن البوت داخل BOT_TOKEN (env) أو داخل TOKEN في الكود.")
+        return
+    app = build_app()
+    print("البوت يعمل الآن...")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
