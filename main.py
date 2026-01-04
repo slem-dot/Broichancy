@@ -1609,6 +1609,81 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("admin_mode", None)
     await update.message.reply_text("لوحة الأدمن ✅", reply_markup=ik_admin_home())
 
+
+# =========================
+# User callback (copy + suggestion accept)
+# =========================
+from telegram.ext import ApplicationHandlerStop
+
+async def user_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q:
+        return
+    data = q.data or ""
+    await q.answer()
+
+    uid = q.from_user.id
+
+    # Copy credentials buttons
+    if data == "COPY:USER":
+        u = (context.user_data.get("last_username") or "")
+        if u:
+            await q.message.reply_text(f"{u}")
+        return
+
+    if data == "COPY:PASS":
+        p = (context.user_data.get("last_password") or "")
+        if p:
+            await q.message.reply_text(f"{p}")
+        return
+
+    # iChancy suggested username accept/retry/menu
+    if data == "EISH:MENU":
+        # just show actions menu
+        await q.message.reply_text("اختر من القائمة:", reply_markup=kb_eish_actions())
+        return
+
+    if data == "EISH:RETRY":
+        context.user_data.pop("suggest_username", None)
+        await q.message.reply_text("اكتب اسم مستخدم جديد:", reply_markup=kb_back())
+        return
+
+    if data == "EISH:ACCEPT":
+        sug = context.user_data.get("suggest_username")
+        if not sug:
+            await q.message.reply_text("⚠️ لا يوجد اقتراح حاليًا. اكتب اسم مستخدم جديد:", reply_markup=kb_back())
+            return
+        if get_eish(uid):
+            await q.message.reply_text("⚠️ لديك حساب إيـشانسي محفوظ بالفعل.", reply_markup=kb_eish_actions())
+            context.user_data.pop("suggest_username", None)
+            return
+        assigned = await assign_pool_account(uid, sug)
+        if not assigned:
+            # someone else took it, suggest again
+            new_sug = suggest_pool_account(sug)
+            if not new_sug:
+                await q.message.reply_text("❌ لا يوجد حسابات متاحة حاليًا. حاول لاحقًا.", reply_markup=kb_eish_actions())
+                context.user_data.pop("suggest_username", None)
+                return
+            context.user_data["suggest_username"] = new_sug["username"]
+            await q.message.reply_text(
+                "⚠️ تم حجز الحساب المقترح من مستخدم آخر.\n\n"
+                f"✅ نقترح عليك هذا الحساب المتاح:\n{new_sug['username']}\n\n"
+                "هل تريد اعتماده؟",
+                reply_markup=ik_suggest_accept()
+            )
+            return
+        save_eish(uid, assigned["username"], assigned["password"])
+        context.user_data["last_username"] = assigned["username"]
+        context.user_data["last_password"] = assigned["password"]
+        await q.message.reply_text(
+            "✅ تم تجهيز حسابك بنجاح:\n\n"            f"```\nUsername: {assigned['username']}\nPassword: {assigned['password']}\n```",
+            parse_mode="Markdown",
+            reply_markup=ik_copy_creds()
+        )
+        context.user_data.pop("suggest_username", None)
+        return
+
 # =========================
 # Admin callback
 # =========================
@@ -1882,9 +1957,10 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🧾 Eishancy: {e_name}\n"
             f"🚫 Banned: {banned}\nReason: {reason or '-'}\n\n"
             "أوامر تحكم:\nADJ +1000 سبب\nADJ -500 سبب\nBAN السبب\nUNBAN\nHIST",
-            reply_markup=ik_admin_home()
+            reply_markup=ik_epool_home()
         )
-        return
+        raise ApplicationHandlerStop
+
 
     if data == "AD:STATS":
         orders = list_orders()
@@ -1902,9 +1978,10 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ مرفوض: {rejected}\n\n"
             f"💰 مجموع Balance: {total_balance}\n"
             f"⏳ مجموع Hold: {total_hold}",
-            reply_markup=ik_admin_home()
+            reply_markup=ik_epool_home()
         )
-        return
+        raise ApplicationHandlerStop
+
 
     if data == "AD:SETTINGS":
         s = get_settings()
@@ -1918,9 +1995,10 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"- Admin Page Size: {s['admin_page_size']}\n\n"
             "لتعديلها أرسل:\n"
             "SET syriatel_code=23547 min_topup=15000 min_withdraw=50000 max_pending=1 admin_page_size=6",
-            reply_markup=ik_admin_home()
+            reply_markup=ik_epool_home()
         )
-        return
+        raise ApplicationHandlerStop
+
 
     if data == "AD:EXPORT":
         s = get_settings()
@@ -1929,9 +2007,10 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"required_channel={REQUIRED_CHANNEL}\n"
             f"settings={s}\n"
             "files=[balances.json, orders.json, history.json, bans.json, admin_log.json, eishancy_accounts.json]",
-            reply_markup=ik_admin_home()
+            reply_markup=ik_epool_home()
         )
-        return
+        raise ApplicationHandlerStop
+
 
     
     if data == "AD:BCAST":
@@ -2001,9 +2080,10 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✏️ أرسل البيانات الجديدة بهذا الشكل:\n"
             "username password\n\n"
             "مثال:\nSleman123 Pass@123",
-            reply_markup=ik_admin_home()
+            reply_markup=ik_epool_home()
         )
-        return
+        raise ApplicationHandlerStop
+
 
     # قبول/رفض
     if data.startswith("OD:APPROVE:") or data.startswith("OD:REJECT:"):
@@ -2144,9 +2224,10 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🧾 Eishancy: {e_name}\n"
             f"🚫 Banned: {banned}\nReason: {reason or '-'}\n\n"
             "أوامر تحكم:\nADJ +1000 سبب\nADJ -500 سبب\nBAN السبب\nUNBAN\nHIST",
-            reply_markup=ik_admin_home()
+            reply_markup=ik_epool_home()
         )
-        return
+        raise ApplicationHandlerStop
+
 
     if data.startswith("OD:HIST:"):
         order_id = data.split(":")[2]
@@ -2185,9 +2266,10 @@ async def admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"مضاف: {res['added']}\n"
             f"متجاهل/مكرر: {res['skipped']}\n\n"
             f"📊 الآن: إجمالي {st['total']} | متاح {st['available']} | موزع {st['assigned']}",
-            reply_markup=ik_admin_home()
+            reply_markup=ik_epool_home()
         )
-        return
+        raise ApplicationHandlerStop
+
 
     if mode.startswith("EDITCREATE:"):
         order_id = mode.split(":", 1)[1]
@@ -2313,9 +2395,10 @@ async def admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🧾 Eishancy: {e_name}\n"
             f"🚫 Banned: {banned}\nReason: {reason or '-'}\n\n"
             "أوامر:\nADJ +1000 سبب\nADJ -500 سبب\nBAN السبب\nUNBAN\nHIST",
-            reply_markup=ik_admin_home()
+            reply_markup=ik_epool_home()
         )
-        return
+        raise ApplicationHandlerStop
+
 
     if mode.startswith("USERCTX:"):
         uid = int(mode.split(":")[1])
@@ -2424,6 +2507,7 @@ def build_app():
     app.add_handler(CommandHandler("admin", cmd_admin))
 
     # ✅ نخلي admin_cb يستقبل فقط كولباكات الأدمن الخاصة
+    app.add_handler(CallbackQueryHandler(user_cb, pattern=r"^(EISH:|COPY:)"))
     app.add_handler(CallbackQueryHandler(admin_cb, pattern=r"^(AD:|OD:)"))
 
     
@@ -2526,5 +2610,3 @@ async def assign_pool_account(uid: int, username: str) -> Dict[str, Any] | None:
                 _save_pool(pool)
                 return a
         return None
-
-
