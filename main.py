@@ -1763,6 +1763,26 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text(username)
         return
 
+
+    # زر نسخ حساب إيـشانسي داخل بطاقة الطلب (Order) — موحد لكل طلبات إيـشانسي
+    # callback_data: OD:COPYEISH:<order_id>
+    if data.startswith("OD:COPYEISH:"):
+        try:
+            order_id = data.split(":", 2)[2]
+        except Exception:
+            order_id = ""
+        order = get_order(order_id) if order_id else None
+        if not order:
+            await q.message.reply_text("❌ الطلب غير موجود.")
+            return
+        eish_u = (order.get("eish_username") or "").strip()
+        if not eish_u:
+            await q.message.reply_text("❌ لا يوجد اسم حساب إيـشانسي داخل هذا الطلب.")
+            return
+        # إرسال الاسم كنص منفصل ليسهل نسخه
+        await q.message.reply_text(eish_u)
+        return
+
     if data == "AD:HOME":
         context.user_data.pop("admin_mode", None)
         await q.message.reply_text("لوحة الأدمن ✅", reply_markup=ik_admin_home())
