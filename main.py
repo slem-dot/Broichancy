@@ -891,20 +891,12 @@ async def smart_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ST_EISH_ACTION
 
         await update.message.reply_text(
-            "📄 معلومات حسابك على iChancy ✅
-
-"
-            f"👤 اسم المستخدم:
-`{e.get('username','')}`
-
-"
-            f"🔑 كلمة المرور:
-`{e.get('password','')}`
-
-"
-            "اضغط مطوّل على الاسم أو كلمة المرور للنسخ.",
+            "📄 معلومات حسابك على iChancy ✅\n\n"
+            f"👤 اسم المستخدم:\n`{e.get('username', '-')}`\n\n"
+            f"🔑 كلمة المرور:\n`{e.get('password', '-')}`\n\n"
+            "📝 اضغط مطوّلًا على الرسالة للنسخ، أو استخدم الأزرار بالأسفل:",
             parse_mode="Markdown",
-            reply_markup=kb_eish_actions()
+            reply_markup=ik_copy_creds()
         )
         return ST_EISH_ACTION
 
@@ -1431,22 +1423,12 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_history(uid, {"ts": int(time.time()), "event": "created", "type": "eish_topup", "order_id": order_id, "amount": amount})
 
         admin_msg = (
-            "📩 طلب شحن حساب إيـشانسي
-
-"
-            f"OrderID: {order_id}
-"
-            f"UserID: {uid}
-
-"
-            f"👤 اسم حساب إيـشانسي:
-`{order['eish_username']}`
-
-"
-            f"💰 المبلغ: {amount}
-
-"
-            "تنبيه: تم حجز المبلغ من رصيد المستخدم داخل البوت."
+            "📩 طلب شحن حساب إيـشانسي:\n"
+            f"OrderID: {order_id}\n"
+            f"UserID: {uid}\n"
+            f"حساب iChancy: {order['eish_username']}\n"
+            f"المبلغ: {amount}\n\n"
+            "ملاحظة: تم حجز المبلغ من رصيد المستخدم داخل البوت."
         )
 
         _base_kb = ik_order_actions(order_id, allow_edit=False)
@@ -2637,3 +2619,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
