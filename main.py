@@ -773,8 +773,8 @@ def ik_admin_home():
 
 def ik_copy_creds():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 نسخ اسم المستخدم", callback_data="COPY:USER"),
-         InlineKeyboardButton("📋 نسخ كلمة المرور", callback_data="COPY:PASS")],
+        [InlineKeyboardButton("📋 نسخ اسم المستخدم", callback_data="CP:U"),
+         InlineKeyboardButton("📋 نسخ كلمة المرور", callback_data="CP:P")],
         [InlineKeyboardButton("⬅️ رجوع", callback_data="EISH:MENU")]
     ])
 
@@ -796,7 +796,7 @@ def ik_epool_home():
 def ik_admin_back():
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ رجوع", callback_data="AD:HOME")]])
 
-def ik_order_actions(order_id: str, allow_edit: bool = False):
+def ik_order_actions(order_id: str, allow_edit: bool = False, extra_rows: list | None = None):
     rows = [
         [InlineKeyboardButton("✅ قبول", callback_data=f"OD:APPROVE:{order_id}"),
          InlineKeyboardButton("❌ رفض", callback_data=f"OD:REJECT:{order_id}")],
@@ -806,8 +806,10 @@ def ik_order_actions(order_id: str, allow_edit: bool = False):
     rows += [
         [InlineKeyboardButton("👤 المستخدم", callback_data=f"OD:USER:{order_id}"),
          InlineKeyboardButton("🧾 السجل", callback_data=f"OD:HIST:{order_id}")],
-        [InlineKeyboardButton("⬅️ رجوع", callback_data="AD:PENDING:0")]
     ]
+    if extra_rows:
+        rows.extend(extra_rows)
+    rows.append([InlineKeyboardButton("⬅️ رجوع", callback_data="AD:PENDING:0")])
     return InlineKeyboardMarkup(rows)
 
 def ik_pagination(base: str, page: int, has_prev: bool, has_next: bool):
@@ -1026,6 +1028,23 @@ async def eish_choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data["amount_min"] = 1
         await update.message.reply_text("اكتب المبلغ المطلوب سحبه من إيـشانسي (بالأرقام فقط):", reply_markup=kb_back())
         return ST_AMOUNT
+
+    # عرض معلومات حساب المستخدم (مع أزرار نسخ)
+    if text == BTN_MY_EISH:
+        e = get_eish(uid)
+        if not e:
+            await update.message.reply_text("ℹ️ لا يوجد لديك حساب إيـشانسي محفوظ.", reply_markup=kb_eish_actions())
+            return ST_EISH_ACTION
+        context.user_data["last_username"] = e.get("username","")
+        context.user_data["last_password"] = e.get("password","")
+        await update.message.reply_text(
+            "📄 معلومات حسابك على iChancy\n\n"
+            f"اسم المستخدم: {e.get('username','-')}\n"
+            f"كلمة المرور: {e.get('password','-')}\n\n"
+            "اضغط الأزرار بالأسفل للنسخ:",
+            reply_markup=ik_copy_creds()
+        )
+        return ST_EISH_ACTION
 
     if text == BTN_EISH_SITE:
         await update.message.reply_text("🔗 رابط الموقع الرسمي:\nhttps://www.ichancy.com", reply_markup=kb_eish_actions())
@@ -1504,7 +1523,7 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"المبلغ: {amount}\n\n"
             "ملاحظة: عند القبول سيتم إضافة المبلغ إلى رصيد المستخدم داخل البوت."
         )
-        await notify_admins(context, text=admin_msg, reply_markup=ik_order_actions(order_id, allow_edit=False), order_id=order_id)
+        await notify_admins(context, text=admin_msg, reply_markup=ik_order_actions(order_id, allow_edit=False, extra_rows=[[InlineKeyboardButton("📋 نسخ حساب إيـشانسي", callback_data=f"OD:COPYEISH:{order_id}")]]), order_id=order_id)
 
         context.user_data.clear()
         await update.message.reply_text(msg_pending_notice(), reply_markup=kb_main())
@@ -1635,13 +1654,13 @@ async def user_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = q.from_user.id
 
     # Copy creds (send as plain message so user can copy)
-    if data == "CP:U":
+    if data in ("CP:U","COPY:USER"):
         u = (context.user_data.get("last_username") or "").strip()
         if u:
             await q.message.reply_text(u)
         return
 
-    if data == "CP:P":
+    if data in ("CP:P","COPY:PASS"):
         p = (context.user_data.get("last_password") or "").strip()
         if p:
             await q.message.reply_text(p)
@@ -1856,7 +1875,7 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text = str(o)
 
             allow_edit = (t == "eish_create")
-            await q.message.reply_text(text, reply_markup=ik_order_actions(o["order_id"], allow_edit=allow_edit))
+            await q.message.reply_text(text, reply_markup=ik_order_actions(o["order_id"], allow_edit=allow_edit, extra_rows=[[InlineKeyboardButton("📋 نسخ حساب إيـشانسي", callback_data=f"OD:COPYEISH:{o['order_id']}")]] ) if o.get("type")=="eish_topup" else ik_order_actions(o["order_id"], allow_edit=allow_edit))
         return
 
     if data.startswith("AD:LAST:"):
