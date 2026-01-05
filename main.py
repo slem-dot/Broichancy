@@ -99,14 +99,14 @@ DEFAULT_SETTINGS = {
 BTN_EISHANCY = "حساب ايشانسي"
 BTN_BALANCE  = "رصيدي"
 BTN_REFERRALS = "🎁 الإحالات"
-BTN_BACK     = "رجوع للقائمة الرئيسية"
+BTN_BACK     = "⬅️ رجوع"
 
-BTN_CREATE   = "إنشاء حساب"
-BTN_E_TOPUP  = "شحن حساب ايشانسي"
-BTN_E_WITH   = "سحب من حساب ايشانسي"
-BTN_E_DEL    = "حذف حساب ايشانسي"
+BTN_MY_EISH  = "👤 حسابي"
+BTN_CREATE   = "🆕 إنشاء حساب"
+BTN_E_TOPUP  = "💳 شحن إيـشانسي"
+BTN_E_WITH   = "💸 سحب من إيـشانسي"
+BTN_E_DEL    = "🗑️ حذف الحساب"
 BTN_EISH_SITE = "🌐 موقع iChancy"
-BTN_MY_ACCOUNT = "👤 حسابي"
 
 BTN_BOT_TOPUP    = "شحن رصيد في البوت"
 BTN_BOT_WITHDRAW = "سحب رصيد من البوت"
@@ -116,6 +116,7 @@ BTN_SHAM     = "شام كاش"
 
 BTN_CONFIRM  = "✅ تأكيد"
 BTN_CANCEL   = "❌ إلغاء"
+
 
 # =========================
 # Callback (اشتراك إجباري)
@@ -708,9 +709,10 @@ def kb_back():
 def kb_eish_actions():
     return ReplyKeyboardMarkup(
         [
+            [KeyboardButton(BTN_MY_EISH)],
             [KeyboardButton(BTN_CREATE), KeyboardButton(BTN_E_TOPUP)],
             [KeyboardButton(BTN_E_WITH), KeyboardButton(BTN_E_DEL)],
-            [KeyboardButton(BTN_MY_ACCOUNT), KeyboardButton(BTN_EISH_SITE)],
+            [KeyboardButton(BTN_EISH_SITE)],
             [KeyboardButton(BTN_BACK)]
         ],
         resize_keyboard=True
@@ -763,8 +765,8 @@ def ik_admin_home():
 
 def ik_copy_creds():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 نسخ اسم المستخدم", callback_data="CP:U"),
-         InlineKeyboardButton("📋 نسخ كلمة المرور", callback_data="CP:P")],
+        [InlineKeyboardButton("📋 نسخ اسم المستخدم", callback_data="COPY:USER"),
+         InlineKeyboardButton("📋 نسخ كلمة المرور", callback_data="COPY:PASS")],
         [InlineKeyboardButton("⬅️ رجوع", callback_data="EISH:MENU")]
     ])
 
@@ -880,6 +882,32 @@ async def smart_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == BTN_BACK:
         return await go_home(update, context)
 
+
+    # 👤 عرض بيانات حساب إيـشانسي (بدون منع حتى لو لديه طلب معلّق)
+    if text == BTN_MY_EISH:
+        e = get_eish(uid)
+        if not e:
+            await update.message.reply_text("ℹ️ لا يوجد لديك حساب إيـشانسي محفوظ.", reply_markup=kb_eish_actions())
+            return ST_EISH_ACTION
+
+        await update.message.reply_text(
+            "📄 معلومات حسابك على iChancy ✅
+
+"
+            f"👤 اسم المستخدم:
+`{e.get('username','')}`
+
+"
+            f"🔑 كلمة المرور:
+`{e.get('password','')}`
+
+"
+            "اضغط مطوّل على الاسم أو كلمة المرور للنسخ.",
+            parse_mode="Markdown",
+            reply_markup=kb_eish_actions()
+        )
+        return ST_EISH_ACTION
+
     if text in (BTN_EISHANCY, BTN_BALANCE):
         return await main_menu(update, context)
 
@@ -948,24 +976,6 @@ async def eish_choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if text == BTN_BACK:
         return await go_home(update, context)
-
-
-    if text == BTN_MY_ACCOUNT:
-        e = get_eish(uid)
-        if not e:
-            await update.message.reply_text("ℹ️ لا يوجد لديك حساب إيـشانسي محفوظ بعد.", reply_markup=kb_eish_actions())
-            return ST_EISH_ACTION
-        # store for copy buttons
-        context.user_data["last_username"] = e.get("username","")
-        context.user_data["last_password"] = e.get("password","")
-        await update.message.reply_text(
-            "👤 معلومات حساب إيـشانسي الخاص بك:\n\n"
-            f"Username: `{e.get('username','')}`\n"
-            f"Password: `{e.get('password','')}`",
-            parse_mode="Markdown",
-            reply_markup=ik_copy_creds()
-        )
-        return ST_EISH_ACTION
 
     if has_pending_lock(uid):
         await update.message.reply_text(
@@ -1421,14 +1431,30 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_history(uid, {"ts": int(time.time()), "event": "created", "type": "eish_topup", "order_id": order_id, "amount": amount})
 
         admin_msg = (
-            "📩 طلب شحن حساب إيـشانسي:\n"
-            f"OrderID: {order_id}\n"
-            f"UserID: {uid}\n"
-            f"👤 Eishancy Username:\n{order['eish_username']}\n"
-            f"المبلغ: {amount}\n\n"
+            "📩 طلب شحن حساب إيـشانسي
+
+"
+            f"OrderID: {order_id}
+"
+            f"UserID: {uid}
+
+"
+            f"👤 اسم حساب إيـشانسي:
+`{order['eish_username']}`
+
+"
+            f"💰 المبلغ: {amount}
+
+"
             "تنبيه: تم حجز المبلغ من رصيد المستخدم داخل البوت."
         )
-        await notify_admins(context, text=admin_msg, reply_markup=ik_order_actions(order_id, allow_edit=False), order_id=order_id)
+
+        _base_kb = ik_order_actions(order_id, allow_edit=False)
+        _rows = [
+            [InlineKeyboardButton("📋 نسخ اسم الحساب", callback_data=f"COPY_EISH:{order['eish_username']}")],
+            *_base_kb.inline_keyboard
+        ]
+        await notify_admins(context, text=admin_msg, reply_markup=InlineKeyboardMarkup(_rows), order_id=order_id)
 
         context.user_data.clear()
         await update.message.reply_text(msg_pending_notice() + "\n\n⏳ تم حجز المبلغ من رصيدك مؤقتًا.", reply_markup=kb_main())
@@ -1697,6 +1723,13 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     data = q.data or ""
+
+    # 📋 نسخ اسم حساب إيـشانسي للأدمن (يرسل الاسم برسالة مستقلة للنسخ السريع)
+    if data.startswith("COPY_EISH:"):
+        username = data.split(":", 1)[1]
+        if username:
+            await q.message.reply_text(username)
+        return
 
     if data == "AD:HOME":
         context.user_data.pop("admin_mode", None)
