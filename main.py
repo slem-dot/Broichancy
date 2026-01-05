@@ -29,6 +29,7 @@ pip install python-telegram-bot==21.6
 import json
 import os
 import time
+from difflib import SequenceMatcher
 import asyncio
 import re
 from typing import Dict, Any, Optional, List, Tuple
@@ -66,8 +67,15 @@ if not SUPER_ADMIN_ID:
     raise RuntimeError("SUPER_ADMIN_ID env var is required (your Telegram numeric ID)")
 ADMIN_ID = SUPER_ADMIN_ID
   # السوبر أدمن (يستطيع تعيين/إزالة أدمن)
-DATA_DIR = os.getenv("DATA_DIR", "data")
-os.makedirs(DATA_DIR, exist_ok=True)
+# DATA_DIR (persistent storage)
+# On Railway you should mount a Volume to /app/data and set DATA_DIR=/app/data
+DATA_DIR = (os.getenv("DATA_DIR") or "/app/data").strip() or "/app/data"
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+except Exception:
+    # Fallback to local relative dir if /app/data isn't writable (e.g. local dev)
+    DATA_DIR = "data"
+    os.makedirs(DATA_DIR, exist_ok=True)
 
 ADMINS_FILE   = os.path.join(DATA_DIR, "admins.json")
 USERS_FILE    = os.path.join(DATA_DIR, "users.json")
@@ -882,6 +890,22 @@ async def smart_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == BTN_BACK:
         return await go_home(update, context)
 
+    if text == BTN_MY_EISH:
+        e = get_eish(uid)
+        if not e:
+            await update.message.reply_text("ℹ️ لا يوجد لديك حساب إيـشانسي محفوظ.", reply_markup=kb_eish_actions())
+            return ST_EISH_ACTION
+
+        await update.message.reply_text(
+            "📄 معلومات حسابك على iChancy\n\n"
+            f"👤 اسم المستخدم:\n`{e.get('username','')}`\n\n"
+            f"🔑 كلمة المرور:\n`{e.get('password','')}`\n\n"
+            "اضغط مطوّل للنسخ ⬆️",
+            parse_mode="Markdown",
+            reply_markup=kb_eish_actions()
+        )
+        return ST_EISH_ACTION
+
 
     # 👤 عرض بيانات حساب إيـشانسي (بدون منع حتى لو لديه طلب معلّق)
     if text == BTN_MY_EISH:
@@ -1033,24 +1057,13 @@ async def eish_get_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     uid = update.effective_user.id
-    text = safe_text(update.message.text)
-    if text == BTN_BACK:
-        return await go_home(update, context)
-    if not text:
-        await update.message.reply_text("❌ اسم المستخدم غير صالح، حاول مجددًا.")
-        return ST_E_USER
+    raw = safe_text(update.message.text)
 
-    # Validate format: prefix + number (example: bro_ahmad22)
-    pref, num = _parse_prefix_num(text)
-    if not pref:
-        await update.message.reply_text(
-            "❌ الاسم غير مطابق للصيغة المطلوبة.\n"
-            "يرجى اختيار اسم مثل:\n"
-            "bro_ahmad22\n"
-            "bro_omar10\n\n"
-            "اكتب اسم مستخدم جديد:",
-            reply_markup=kb_back()
-        )
+    if raw == BTN_BACK:
+        return await go_home(update, context)
+
+    if not raw or len(raw) < 2:
+        await update.message.reply_text("❌ اكتب اسم مستخدم صحيح.", reply_markup=kb_back())
         return ST_E_USER
 
     if get_eish(uid):
@@ -1060,39 +1073,46 @@ async def eish_get_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ST_EISH_ACTION
 
-    assigned = await assign_pool_account(uid, text)
+    desired = raw.strip()
+
+    # 1) If user entered an exact available username in the pool, assign مباشرة
+    assigned = await assign_pool_account(uid, desired)
     if assigned:
         set_eish(uid, assigned["username"], assigned["password"])
         context.user_data["last_username"] = assigned["username"]
         context.user_data["last_password"] = assigned["password"]
         await update.message.reply_text(
             "✅ تم تجهيز حسابك بنجاح:\n\n"
-            f"```\nUsername: {assigned['username']}\nPassword: {assigned['password']}\n```",
+            f"اسم المستخدم: `{assigned['username']}`\n"
+            f"كلمة المرور: `{assigned['password']}`\n\n"
+            "اضغط مطوّل للنسخ ⬆️",
             parse_mode="Markdown",
-            reply_markup=ik_copy_creds()
+            reply_markup=kb_eish_actions()
         )
         return ST_EISH_ACTION
 
-    sug = suggest_pool_account(text)
+    # 2) Otherwise suggest the closest available username (ذكي حتى لو كتب Ahmad فقط)
+    sug = suggest_pool_account(desired)
     if not sug:
         pool = _load_pool()
         examples = [a.get("username") for a in pool if a.get("status") == "available" and isinstance(a.get("username"), str)]
-        examples = [e for e in examples if e][:3]
+        examples = [e for e in examples if e][:5]
         ex_txt = "\n".join(examples) if examples else "bro_ahmad22\nbro_omar10"
         await update.message.reply_text(
-            "❌ الاسم الذي اخترته غير متوفر حاليًا.\n\n"
-            "يرجى اختيار اسم مطابق للأسماء المتاحة، على سبيل المثال:\n"
+            "❌ الاسم الذي أدخلته غير متوفر حاليًا.\n\n"
+            "جرّب أحد الأسماء المتاحة مثل:\n"
             f"{ex_txt}\n\n"
-            "اكتب اسم مستخدم جديد:",
+            "اكتب اسم آخر:",
             reply_markup=kb_back()
         )
         return ST_E_USER
 
     context.user_data["suggest_username"] = sug["username"]
     await update.message.reply_text(
-        "❌ الاسم الذي أدخلته غير متوفر حاليًا.\n\n"
-        f"✅ نقترح عليك هذا الحساب المتاح:\n{sug['username']}\n\n"
+        "✅ وجدنا حساب قريب من طلبك:\n\n"
+        f"👤 الاقتراح: `{sug['username']}`\n\n"
         "هل تريد اعتماده؟",
+        parse_mode="Markdown",
         reply_markup=ik_suggest_accept()
     )
     return ST_E_USER
@@ -1433,7 +1453,7 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         _base_kb = ik_order_actions(order_id, allow_edit=False)
         _rows = [
-            [InlineKeyboardButton("📋 نسخ اسم الحساب", callback_data=f"COPY_EISH:{order['eish_username']}")],
+            [InlineKeyboardButton("📋 نسخ اسم الحساب", callback_data=f"AD:COPY_EISH:{order_id}")],
             *_base_kb.inline_keyboard
         ]
         await notify_admins(context, text=admin_msg, reply_markup=InlineKeyboardMarkup(_rows), order_id=order_id)
@@ -1707,6 +1727,17 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data or ""
 
     # 📋 نسخ اسم حساب إيـشانسي للأدمن (يرسل الاسم برسالة مستقلة للنسخ السريع)
+    if data.startswith("AD:COPY_EISH:"):
+        order_id = data.split(":", 2)[2]
+        order = get_order(order_id)
+        username = (order or {}).get("eish_username") or ""
+        if username:
+            await q.message.reply_text(username)
+        else:
+            await q.message.reply_text("ℹ️ لم يتم العثور على اسم الحساب لهذا الطلب.")
+        return
+
+    # (توافق خلفي) إذا كان في زر قديم
     if data.startswith("COPY_EISH:"):
         username = data.split(":", 1)[1]
         if username:
@@ -2516,29 +2547,73 @@ def add_pool_bulk(lines: List[str]) -> Dict[str, int]:
     _save_pool(pool)
     return {"added": added, "skipped": skipped}
 
+def _normalize_username_for_match(s: str) -> str:
+    """Normalize username to improve matching (e.g. bro_ahmad22 -> ahmad)."""
+    s = (s or "").strip().lower()
+    # drop common prefix
+    if s.startswith("bro_"):
+        s = s[4:]
+    if s.startswith("bro"):
+        # e.g. broahmad
+        s = s[3:]
+    # remove separators
+    s = s.replace("_", "").replace("-", "").replace(" ", "")
+    # keep letters only for matching
+    s = re.sub(r"\d+", "", s)
+    s = re.sub(r"[^a-z]+", "", s)
+    return s
+
 def _parse_prefix_num(s: str):
-    m = re.match(r"^([a-zA-Z_]+)(\d+)$", s)
+    """Legacy parser for usernames like bro_ahmad22 (returns (prefix, number))."""
+    m = re.match(r"^([a-zA-Z_]+)(\d+)$", (s or "").strip())
     if not m:
         return None, None
     return m.group(1), int(m.group(2))
 
 def suggest_pool_account(desired_username: str) -> Dict[str, Any] | None:
-    """Return best available account dict (not reserved)."""
-    pool = _load_pool()
-    pref, num = _parse_prefix_num(desired_username)
-    if not pref:
+    """Return best available account dict.
+    - Works even if user types only a name like 'Ahmad' (without 'bro_').
+    - Uses simple fuzzy matching over available usernames.
+    """
+    desired_raw = (desired_username or "").strip()
+    if not desired_raw:
         return None
-    candidates = [a for a in pool if a.get("status") == "available" and str(a.get("username","")).startswith(pref)]
+
+    desired_norm = _normalize_username_for_match(desired_raw)
+    if not desired_norm:
+        return None
+
+    pool = _load_pool()
+    candidates = [a for a in pool if a.get("status") == "available" and isinstance(a.get("username"), str)]
     if not candidates:
         return None
-    # compute closest by number if possible; else first
-    def keyfn(a):
-        ap, an = _parse_prefix_num(str(a.get("username","")))
-        if an is None:
-            return (10**9, str(a.get("username","")))
-        return (abs(an - num), an)
-    candidates.sort(key=keyfn)
-    return candidates[0]
+
+    # Score candidates: prefer substring match, otherwise SequenceMatcher ratio
+    best = None
+    best_score = -1.0
+    for a in candidates:
+        uname = a.get("username") or ""
+        norm = _normalize_username_for_match(uname)
+        if not norm:
+            continue
+
+        # substring bonus
+        if desired_norm in norm or norm in desired_norm:
+            score = 2.0 + (len(desired_norm) / max(1, len(norm)))
+        else:
+            score = SequenceMatcher(None, desired_norm, norm).ratio()
+
+        if score > best_score:
+            best_score = score
+            best = a
+
+    # Require a minimum confidence unless substring match boosted it
+    if best is None:
+        return None
+    if best_score < 0.55:
+        # too weak match
+        return None
+    return best
 
 async def assign_pool_account(uid: int, username: str) -> Dict[str, Any] | None:
     async with _POOL_LOCK:
