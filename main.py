@@ -106,6 +106,7 @@ BTN_E_TOPUP  = "شحن حساب ايشانسي"
 BTN_E_WITH   = "سحب من حساب ايشانسي"
 BTN_E_DEL    = "حذف حساب ايشانسي"
 BTN_EISH_SITE = "🌐 موقع iChancy"
+BTN_MY_ACCOUNT = "👤 حسابي"
 
 BTN_BOT_TOPUP    = "شحن رصيد في البوت"
 BTN_BOT_WITHDRAW = "سحب رصيد من البوت"
@@ -709,7 +710,7 @@ def kb_eish_actions():
         [
             [KeyboardButton(BTN_CREATE), KeyboardButton(BTN_E_TOPUP)],
             [KeyboardButton(BTN_E_WITH), KeyboardButton(BTN_E_DEL)],
-            [KeyboardButton(BTN_EISH_SITE)],
+            [KeyboardButton(BTN_MY_ACCOUNT), KeyboardButton(BTN_EISH_SITE)],
             [KeyboardButton(BTN_BACK)]
         ],
         resize_keyboard=True
@@ -762,8 +763,8 @@ def ik_admin_home():
 
 def ik_copy_creds():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 نسخ اسم المستخدم", callback_data="COPY:USER"),
-         InlineKeyboardButton("📋 نسخ كلمة المرور", callback_data="COPY:PASS")],
+        [InlineKeyboardButton("📋 نسخ اسم المستخدم", callback_data="CP:U"),
+         InlineKeyboardButton("📋 نسخ كلمة المرور", callback_data="CP:P")],
         [InlineKeyboardButton("⬅️ رجوع", callback_data="EISH:MENU")]
     ])
 
@@ -947,6 +948,24 @@ async def eish_choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if text == BTN_BACK:
         return await go_home(update, context)
+
+
+    if text == BTN_MY_ACCOUNT:
+        e = get_eish(uid)
+        if not e:
+            await update.message.reply_text("ℹ️ لا يوجد لديك حساب إيـشانسي محفوظ بعد.", reply_markup=kb_eish_actions())
+            return ST_EISH_ACTION
+        # store for copy buttons
+        context.user_data["last_username"] = e.get("username","")
+        context.user_data["last_password"] = e.get("password","")
+        await update.message.reply_text(
+            "👤 معلومات حساب إيـشانسي الخاص بك:\n\n"
+            f"Username: `{e.get('username','')}`\n"
+            f"Password: `{e.get('password','')}`",
+            parse_mode="Markdown",
+            reply_markup=ik_copy_creds()
+        )
+        return ST_EISH_ACTION
 
     if has_pending_lock(uid):
         await update.message.reply_text(
@@ -1405,7 +1424,7 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📩 طلب شحن حساب إيـشانسي:\n"
             f"OrderID: {order_id}\n"
             f"UserID: {uid}\n"
-            f"Eishancy Username: {order['eish_username']}\n"
+            f"👤 Eishancy Username:\n{order['eish_username']}\n"
             f"المبلغ: {amount}\n\n"
             "تنبيه: تم حجز المبلغ من رصيد المستخدم داخل البوت."
         )
