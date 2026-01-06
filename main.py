@@ -28,7 +28,10 @@ pip install python-telegram-bot==21.6
 
 import json
 import os
+import shutil
+import tempfile
 import time
+from datetime import datetime
 import zipfile
 from difflib import SequenceMatcher
 import asyncio
@@ -93,6 +96,80 @@ SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
 MAINT_FILE    = os.path.join(DATA_DIR, "maintenance.json")
 BACKUP_DIR    = os.path.join(DATA_DIR, "backups")
 os.makedirs(BACKUP_DIR, exist_ok=True)
+
+# ---- Auto Backup (JobQueue) ----
+AUTO_BACKUP_HOURS = float(os.getenv("AUTO_BACKUP_HOURS", "0") or "0")  # 0 = disabled
+BACKUP_KEEP = int(os.getenv("BACKUP_KEEP", "30") or "30")
+
+async def auto_backup_job(context: ContextTypes.DEFAULT_TYPE):
+    """Periodic backup job: saves a zip to BACKUP_DIR and sends it to admins."""
+    if AUTO_BACKUP_HOURS <= 0:
+        return
+    try:
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_path = os.path.join(BACKUP_DIR, f"auto-backup-{ts}.zip")
+
+        include_paths = []
+        for p in [
+            USERS_DB_PATH,
+            WALLET_DB_PATH,
+            ICHANCY_DB_PATH,
+            HOLD_DB_PATH,
+            POOL_DB_PATH,
+            SETTINGS_DB_PATH,
+            LOG_DB_PATH,
+        ]:
+            if p and os.path.exists(p):
+                include_paths.append(p)
+
+        if os.path.isdir(DATA_DIR):
+            for root, dirs, files in os.walk(DATA_DIR):
+                if os.path.abspath(root).startswith(os.path.abspath(BACKUP_DIR)):
+                    continue
+                for fn in files:
+                    if fn.lower().endswith((".json", ".txt")):
+                        fp = os.path.join(root, fn)
+                        if fp not in include_paths:
+                            include_paths.append(fp)
+
+        with zipfile.ZipFile(backup_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for p in include_paths:
+                try:
+                    arc = os.path.relpath(p, start=DATA_DIR)
+                except Exception:
+                    arc = os.path.basename(p)
+                zf.write(p, arcname=arc)
+
+        # retention
+        try:
+            keep_n = max(1, int(BACKUP_KEEP))
+            existing = sorted(
+                [os.path.join(BACKUP_DIR, f) for f in os.listdir(BACKUP_DIR) if f.lower().endswith(".zip")],
+                key=lambda x: os.path.getmtime(x),
+            )
+            if len(existing) > keep_n:
+                for old in existing[: len(existing) - keep_n]:
+                    try:
+                        os.remove(old)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # send to admins
+        for admin_id in ADMIN_IDS:
+            try:
+                await context.bot.send_document(
+                    chat_id=admin_id,
+                    document=open(backup_path, "rb"),
+                    filename=os.path.basename(backup_path),
+                    caption="🗄️ Auto Backup جاهز",
+                )
+            except Exception:
+                pass
+    except Exception:
+        pass
 EISH_FILE     = os.path.join(DATA_DIR, "eishancy_accounts.json")
 EISH_POOL_FILE = os.path.join(DATA_DIR, "eishancy_pool.json")  # list of {username,password,status,assigned_to,assigned_at}
 REF_FILE       = os.path.join(DATA_DIR, "referrals.json")      # {referrer_id: {points:int, referrals:int, referred:[uids]}}  # {uid:{username,password,created_at}}
@@ -865,7 +942,7 @@ def ik_admin_home():
         [InlineKeyboardButton("👥 سجل المشتركين", callback_data="AD:USERS:0"),
          InlineKeyboardButton("📣 رسالة جماعية", callback_data="AD:BCAST")],
         [InlineKeyboardButton("🗂 مخزون إيـشانسي", callback_data="AD:EPOOL")],
-        [InlineKeyboardButton("🗄️ Backup", callback_data="AD:BACKUP"), InlineKeyboardButton("🛠️ صيانة", callback_data="AD:MAINT")] ,
+        [InlineKeyboardButton("🗄️ Backup", callback_data="AD:BACKUP"), InlineKeyboardButton("♻️ Restore", callback_data="AD:RESTORE"), InlineKeyboardButton("🛠️ صيانة", callback_data="AD:MAINT")],
         [InlineKeyboardButton("🧾 تصدير مختصر", callback_data="AD:EXPORT")]
     ])
 
@@ -2208,41 +2285,106 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=ik_admin_home()
         )
         return
+        if data == "AD:BACKUP":
+            # Create a zip backup of persistent data files and send it to admin.
+            try:
+                os.makedirs(BACKUP_DIR, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+                backup_path = os.path.join(BACKUP_DIR, f"backup-{ts}.zip")
 
-    
-    if data == "AD:BACKUP":
-        # تنفيذ backup سريع (zip لكل data) وإرساله للأدمن
-        await maintenance_start(context, by=int(q.from_user.id))
-        ts = time.strftime("%Y%m%d-%H%M%S", time.localtime())
-        backup_name = f"backup-{ts}.zip"
-        backup_path = os.path.join(BACKUP_DIR, backup_name)
-        try:
-            with zipfile.ZipFile(backup_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                for root, _, files in os.walk(DATA_DIR):
-                    for fn in files:
-                        if fn.endswith(".tmp"):
+                # Which files/folders to include (only what matters for state)
+                include_paths = []
+                for p in [
+                    USERS_DB_PATH,
+                    WALLET_DB_PATH,
+                    ICHANCY_DB_PATH,
+                    HOLD_DB_PATH,
+                    POOL_DB_PATH,
+                    SETTINGS_DB_PATH,
+                    LOG_DB_PATH,
+                ]:
+                    if p and os.path.exists(p):
+                        include_paths.append(p)
+
+                # Also include any extra json/txt state files inside DATA_DIR (excluding backups)
+                if os.path.isdir(DATA_DIR):
+                    for root, dirs, files in os.walk(DATA_DIR):
+                        # avoid recursive backups
+                        if os.path.abspath(root).startswith(os.path.abspath(BACKUP_DIR)):
                             continue
-                        p = os.path.join(root, fn)
-                        arc = os.path.relpath(p, DATA_DIR)
+                        for fn in files:
+                            if fn.lower().endswith((".json", ".txt")):
+                                fp = os.path.join(root, fn)
+                                if fp not in include_paths:
+                                    include_paths.append(fp)
+
+                with zipfile.ZipFile(backup_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    for p in include_paths:
+                        # keep paths relative to DATA_DIR when possible
+                        try:
+                            arc = os.path.relpath(p, start=DATA_DIR)
+                        except Exception:
+                            arc = os.path.basename(p)
                         zf.write(p, arcname=arc)
-                        await context.bot.send_document(chat_id=q.from_user.id, document=open(backup_path, "rb"), filename=backup_name, caption="🗄️ Backup جاهز")
-            await q.message.reply_text("✅ تم إنشاء Backup وإرساله لك.", reply_markup=ik_admin_home())
-        except Exception as e:
-            await q.message.reply_text(f"❌ فشل إنشاء Backup: {e}", reply_markup=ik_admin_home())
-        finally:
-            await maintenance_end(context, by=int(q.from_user.id))
-        return
 
-    if data == "AD:MAINT":
-        m = get_maintenance()
-        if m.get("active"):
-            await maintenance_end(context, by=int(q.from_user.id))
-            await q.message.reply_text("✅ تم إيقاف الصيانة.", reply_markup=ik_admin_home())
-        else:
-            await maintenance_start(context, by=int(q.from_user.id))
-            await q.message.reply_text("🛠️ تم تفعيل الصيانة.", reply_markup=ik_admin_home())
-        return
+                # retention
+                try:
+                    keep_n = max(1, int(os.getenv("BACKUP_KEEP", "30")))
+                    existing = sorted(
+                        [os.path.join(BACKUP_DIR, f) for f in os.listdir(BACKUP_DIR) if f.lower().endswith(".zip")],
+                        key=lambda x: os.path.getmtime(x),
+                    )
+                    if len(existing) > keep_n:
+                        for old in existing[: len(existing) - keep_n]:
+                            try:
+                                os.remove(old)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
 
+                await query.message.reply_document(
+                    document=open(backup_path, "rb"),
+                    filename=os.path.basename(backup_path),
+                    caption="🗄️ Backup جاهز",
+                )
+            except Exception as e:
+                await query.message.reply_text(f"❌ فشل إنشاء Backup: {e}")
+            return
+
+        
+        if data == "AD:RESTORE":
+            # Ask admin to send a backup zip (Document) to restore data files.
+            context.user_data["admin_mode"] = "RESTORE_WAIT_ZIP"
+            await q.message.reply_text(
+                "♻️ استعادة نسخة احتياطية\n\n"
+                "أرسل الآن ملف الـ Backup بصيغة ZIP (الذي تم إنشاؤه من زر Backup).\n"
+                "⚠️ سيتم استبدال بيانات البوت الحالية بالبيانات داخل الملف.\n\n"
+                "للإلغاء اضغط: ❌ إلغاء",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("❌ إلغاء", callback_data="AD:RESTORE:CANCEL")],
+                    [InlineKeyboardButton("⬅️ الرئيسية", callback_data="AD:HOME")],
+                ])
+            )
+            return
+
+        if data == "AD:RESTORE:CANCEL":
+            if context.user_data.get("admin_mode") == "RESTORE_WAIT_ZIP":
+                context.user_data.pop("admin_mode", None)
+            await q.message.reply_text("✅ تم إلغاء الاستعادة.", reply_markup=ik_admin_home())
+            return
+if data == "AD:MAINT":
+
+
+            m = get_maintenance()
+            if m.get("active"):
+                await maintenance_end(context, by=int(q.from_user.id))
+                await q.message.reply_text("✅ تم إيقاف الصيانة.", reply_markup=ik_admin_home())
+            else:
+                await maintenance_start(context, by=int(q.from_user.id))
+                await q.message.reply_text("🛠️ تم تفعيل الصيانة.", reply_markup=ik_admin_home())
+            return
+    
     if data == "AD:EXPORT":
         s = get_settings()
         await q.message.reply_text(
@@ -2859,6 +3001,114 @@ async def assign_pool_account(uid: int, username: str) -> Dict[str, Any] | None:
 
 
 
+
+# =========================
+# Admin document handler (restore backup ZIP)
+# =========================
+async def admin_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Only admins
+    if not is_admin(update.effective_user.id):
+        return
+    mode = context.user_data.get("admin_mode", "")
+    if mode != "RESTORE_WAIT_ZIP":
+        return
+
+    doc = update.effective_message.document if update.effective_message else None
+    if not doc:
+        await update.message.reply_text("❌ لم أستلم ملفًا. أرسل ملف ZIP فقط.", reply_markup=ik_admin_home())
+        context.user_data.pop("admin_mode", None)
+        return
+
+    fn = (doc.file_name or "").lower()
+    if not fn.endswith(".zip"):
+        await update.message.reply_text("❌ الرجاء إرسال ملف بصيغة ZIP فقط.", reply_markup=ik_admin_home())
+        return
+
+    # Enter maintenance during restore (blocks users)
+    try:
+        if not get_maintenance().get("active"):
+            await maintenance_start(context, by=int(update.effective_user.id))
+    except Exception:
+        pass
+
+    tmp_dir = tempfile.mkdtemp(prefix="restore_")
+    zip_local = os.path.join(tmp_dir, "restore.zip")
+
+    try:
+        tg_file = await doc.get_file()
+        await tg_file.download_to_drive(custom_path=zip_local)
+
+        # Safety: pre-restore backup (best-effort)
+        try:
+            os.makedirs(BACKUP_DIR, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            pre_path = os.path.join(BACKUP_DIR, f"pre-restore-{ts}.zip")
+            include_paths = []
+            if os.path.isdir(DATA_DIR):
+                for root, dirs, files in os.walk(DATA_DIR):
+                    if os.path.abspath(root).startswith(os.path.abspath(BACKUP_DIR)):
+                        continue
+                    for f in files:
+                        if f.lower().endswith((".json", ".txt")):
+                            include_paths.append(os.path.join(root, f))
+            with zipfile.ZipFile(pre_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for p in include_paths:
+                    arc = os.path.relpath(p, start=DATA_DIR)
+                    zf.write(p, arcname=arc)
+        except Exception:
+            pass
+
+        # Extract zip safely
+        extract_dir = os.path.join(tmp_dir, "unzipped")
+        os.makedirs(extract_dir, exist_ok=True)
+
+        with zipfile.ZipFile(zip_local, "r") as zf:
+            for info in zf.infolist():
+                name = info.filename
+                # prevent zip slip
+                if name.startswith("/") or name.startswith("\\") or ".." in name.replace("\\", "/").split("/"):
+                    raise ValueError("ملف ZIP غير آمن (مسارات غير مسموحة).")
+            zf.extractall(extract_dir)
+
+        # Copy extracted files into DATA_DIR (overwrite)
+        restored = 0
+        for root, dirs, files in os.walk(extract_dir):
+            for f in files:
+                if not f.lower().endswith((".json", ".txt")):
+                    continue
+                src = os.path.join(root, f)
+                rel = os.path.relpath(src, start=extract_dir)
+                dst = os.path.join(DATA_DIR, rel)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                restored += 1
+
+        # Ensure required files exist after restore
+        _ensure_data_files()
+
+        context.user_data.pop("admin_mode", None)
+        await update.message.reply_text(
+            f"✅ تمت الاستعادة بنجاح.\n"
+            f"📦 الملفات التي تم استرجاعها: {restored}\n\n"
+            "🔁 يفضل إعادة تشغيل الخدمة على Railway لضمان تحميل البيانات فورًا.",
+            reply_markup=ik_admin_home()
+        )
+
+    except Exception as e:
+        context.user_data.pop("admin_mode", None)
+        await update.message.reply_text(f"❌ فشل الاستعادة: {e}", reply_markup=ik_admin_home())
+    finally:
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
+        # End maintenance if we started it via restore (best-effort)
+        try:
+            # keep maintenance if it was already active before? We didn't track; keep it simple: end now.
+            if get_maintenance().get("active"):
+                await maintenance_end(context, by=int(update.effective_user.id))
+        except Exception:
+            pass
 # =========================
 # Build app
 # =========================
@@ -2899,6 +3149,7 @@ def build_app():
     )
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, admin_any), group=0)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text), group=0)
+    app.add_handler(MessageHandler(filters.Document.ALL, admin_document), group=0)
 
     app.add_handler(user_conv, group=1)
 
@@ -2920,9 +3171,15 @@ def main():
         print("ضع توكن البوت داخل BOT_TOKEN (env) أو داخل TOKEN في الكود.")
         return
     app = build_app()
+    # Auto-backup schedule (hours)
+    if AUTO_BACKUP_HOURS and AUTO_BACKUP_HOURS > 0:
+        interval = max(3600, int(AUTO_BACKUP_HOURS * 3600))
+        try:
+            app.job_queue.run_repeating(auto_backup_job, interval=interval, first=interval)
+        except Exception as e:
+            print(f"تعذّر جدولة Auto Backup: {e}")
     print("البوت يعمل الآن...")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-
