@@ -1942,15 +1942,56 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not q:
         return
+
+    data = (q.data or "").strip()
     await q.answer()
 
     if not is_admin(q.from_user.id):
         await q.message.reply_text("❌ هذا القسم للأدمن فقط.")
         return
 
-    data = q.data or ""
+    # ---- Helpers (inner) ----
+    async def _send_backup_once():
+        # Debounce: prevent Telegram retries / double taps from spamming backups
+        now = time.time()
+        last = context.bot_data.get("_last_manual_backup_ts", 0)
+        if now - last < 4:
+            return
+        context.bot_data["_last_manual_backup_ts"] = now
 
-    # 📋 نسخ اسم حساب إيـشانسي للأدمن (يرسل الاسم برسالة مستقلة للنسخ السريع)
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_path = os.path.join(BACKUP_DIR, f"backup-{ts}.zip")
+
+        include_paths = [
+            USERS_DB_PATH,
+            WALLET_DB_PATH,
+            ICHANCY_DB_PATH,
+            HOLD_DB_PATH,
+            POOL_DB_PATH,
+            SETTINGS_DB_PATH,
+            LOG_DB_PATH,
+        ]
+
+        # Build zip
+        with zipfile.ZipFile(backup_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for fp in include_paths:
+                try:
+                    if fp and os.path.exists(fp):
+                        zf.write(fp, arcname=os.path.basename(fp))
+                except Exception:
+                    continue
+
+        # Send zip
+        try:
+            await q.message.reply_document(document=open(backup_path, "rb"), filename=os.path.basename(backup_path))
+        except Exception as e:
+            await q.message.reply_text(f"❌ تعذر إرسال الـ Backup.\n{e}")
+            return
+
+        await q.message.reply_text("🗄️ Backup جاهز")
+
+    # ---- Copy helpers ----
     if data.startswith("AD:COPY_EISH:"):
         order_id = data.split(":", 2)[2]
         order = get_order(order_id)
@@ -1961,21 +2002,14 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text("ℹ️ لم يتم العثور على اسم الحساب لهذا الطلب.")
         return
 
-    # (توافق خلفي) إذا كان في زر قديم
     if data.startswith("COPY_EISH:"):
         username = data.split(":", 1)[1]
         if username:
             await q.message.reply_text(username)
         return
 
-
-    # زر نسخ حساب إيـشانسي داخل بطاقة الطلب (Order) — موحد لكل طلبات إيـشانسي
-    # callback_data: OD:COPYEISH:<order_id>
     if data.startswith("OD:COPYEISH:"):
-        try:
-            order_id = data.split(":", 2)[2]
-        except Exception:
-            order_id = ""
+        order_id = data.split(":", 2)[2] if ":" in data else ""
         order = get_order(order_id) if order_id else None
         if not order:
             await q.message.reply_text("❌ الطلب غير موجود.")
@@ -1984,13 +2018,38 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not eish_u:
             await q.message.reply_text("❌ لا يوجد اسم حساب إيـشانسي داخل هذا الطلب.")
             return
-        # إرسال الاسم كنص منفصل ليسهل نسخه
         await q.message.reply_text(eish_u)
         return
 
+    # ---- Admin main ----
     if data == "AD:HOME":
         context.user_data.pop("admin_mode", None)
         await q.message.reply_text("لوحة الأدمن ✅", reply_markup=ik_admin_home())
+        return
+
+    if data == "AD:BACKUP":
+        await _send_backup_once()
+        return
+
+    if data == "AD:RESTORE":
+        context.user_data["admin_mode"] = "RESTORE_ZIP"
+        await q.message.reply_text(
+            "♻️ أرسل ملف الـ Backup بصيغة ZIP (الذي أرسله لك البوت سابقًا) كـ **ملف** (Document).\nبعد الإرسال سيتم الاستعادة فورًا.",
+            reply_markup=ik_admin_back(),
+            parse_mode="Markdown"
+        )
+        return
+
+    if data == "AD:MAINT":
+        m = get_maintenance()
+        if m.get("enabled"):
+            set_maintenance(False)
+            await broadcast_to_all_users(context, "✅ انتهت الصيانة — عاد البوت للعمل.")
+            await q.message.reply_text("✅ تم إيقاف وضع الصيانة.", reply_markup=ik_admin_home())
+        else:
+            set_maintenance(True)
+            await broadcast_to_all_users(context, "🛠️ تنبيه: البوت الآن في وضع الصيانة. قد تتوقف بعض الخدمات مؤقتًا.")
+            await q.message.reply_text("🛠️ تم تفعيل وضع الصيانة.", reply_markup=ik_admin_home())
         return
 
     if data == "AD:EPOOL":
@@ -2002,46 +2061,50 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if sub == "ADD":
             context.user_data["admin_mode"] = "EPOOL_ADD"
             await q.message.reply_text(
-                "➕ أرسل الحسابات بالجملة بهذا الشكل (سطر لكل حساب):\n"
-                "username:password\n\n"
-                "مثال:\n"
-                "bro_ahmad22:bbb123bb\n"
-                "bro_omar10:pass999\n",
+                """➕ أرسل الحسابات بالجملة بهذا الشكل (سطر لكل حساب):
+username:password
+
+مثال:
+bro_ahmad22:bbb123bb
+bro_omar10:pass999
+""",
                 reply_markup=ik_admin_back()
             )
             return
         if sub == "STATS":
             st = pool_stats()
             await q.message.reply_text(
-                f"📊 إحصائيات المخزون\n\n"
-                f"إجمالي: {st['total']}\n"
-                f"متاح: {st['available']}\n"
-                f"موزع: {st['assigned']}",
+                f"""📊 إحصائيات المخزون
+
+إجمالي: {st['total']}
+متاح: {st['available']}
+موزع: {st['assigned']}""",
                 reply_markup=ik_epool_home()
             )
             return
-        if sub in ("AVAIL","ASSIGNED"):
+        if sub in ("AVAIL", "ASSIGNED"):
             pool = _load_pool()
             want = "available" if sub == "AVAIL" else "assigned"
-            items = [a for a in pool if a.get("status")==want]
+            items = [a for a in pool if a.get("status") == want]
             lines = []
             for a in items[:40]:
-                if want=="available":
+                if want == "available":
                     lines.append(f"- {a.get('username')}")
                 else:
                     lines.append(f"- {a.get('username')} -> {a.get('assigned_to')}")
             body = "\n".join(lines) if lines else "لا يوجد."
-            title = "📋 الحسابات المتاحة" if want=="available" else "📦 الحسابات الموزعة"
+            title = "📋 الحسابات المتاحة" if want == "available" else "📦 الحسابات الموزعة"
             await q.message.reply_text(title + "\n\n" + body, reply_markup=ik_epool_home())
             return
 
+    # ---- Orders (pending / last / search) ----
     if data.startswith("AD:PENDING:"):
         page = int(data.split(":")[-1])
         s = get_settings()
         per_page = int(s["admin_page_size"])
         orders = [o for o in list_orders() if o.get("status") == "pending"]
         start = page * per_page
-        chunk = orders[start:start+per_page]
+        chunk = orders[start:start + per_page]
         has_prev = page > 0
         has_next = start + per_page < len(orders)
 
@@ -2049,7 +2112,10 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text("لا يوجد طلبات معلّقة حاليًا ✅", reply_markup=ik_admin_home())
             return
 
-        await q.message.reply_text(f"📥 الطلبات المعلقة — العدد: {len(orders)}", reply_markup=ik_pagination("AD:PENDING", page, has_prev, has_next))
+        await q.message.reply_text(
+            f"📥 الطلبات المعلقة — العدد: {len(orders)}",
+            reply_markup=ik_pagination("AD:PENDING", page, has_prev, has_next)
+        )
 
         for o in chunk:
             t = o.get("type")
@@ -2100,7 +2166,11 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text = str(o)
 
             allow_edit = (t == "eish_create")
-            await q.message.reply_text(text, reply_markup=ik_order_actions(o["order_id"], allow_edit=allow_edit, extra_rows=[[InlineKeyboardButton("📋 نسخ حساب إيـشانسي", callback_data=f"OD:COPYEISH:{o['order_id']}")]] ) if o.get("type")=="eish_topup" else ik_order_actions(o["order_id"], allow_edit=allow_edit))
+            if o.get("type") == "eish_topup":
+                extra = [[InlineKeyboardButton("📋 نسخ حساب إيـشانسي", callback_data=f"OD:COPYEISH:{o['order_id']}")]]
+                await q.message.reply_text(text, reply_markup=ik_order_actions(o["order_id"], allow_edit=allow_edit, extra_rows=extra))
+            else:
+                await q.message.reply_text(text, reply_markup=ik_order_actions(o["order_id"], allow_edit=allow_edit))
         return
 
     if data.startswith("AD:LAST:"):
@@ -2108,7 +2178,7 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         per_page = 10
         orders = list_orders()
         start = page * per_page
-        chunk = orders[start:start+per_page]
+        chunk = orders[start:start + per_page]
         has_prev = page > 0
         has_next = start + per_page < len(orders)
 
@@ -2116,9 +2186,9 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text("لا يوجد طلبات بعد.", reply_markup=ik_admin_home())
             return
 
-        lines = [f"📜 آخر الطلبات (صفحة {page+1})"]
+        lines = [f"📜 آخر الطلبات (صفحة {page + 1})"]
         for o in chunk:
-            lines.append(f"- {o['order_id']} | {o['type']} | {o['status']} | {o.get('amount',0)} | UID:{o['user_id']}")
+            lines.append(f"- {o['order_id']} | {o['type']} | {o['status']} | {o.get('amount', 0)} | UID:{o['user_id']}")
         await q.message.reply_text("\n".join(lines), reply_markup=ik_pagination("AD:LAST", page, has_prev, has_next))
         return
 
@@ -2132,7 +2202,7 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("أرسل UserID لإدارته (أرقام فقط).", reply_markup=ik_admin_back())
         return
 
-
+    # ---- Users list / info ----
     if data.startswith("AD:USERS:"):
         page = int(data.split(":")[-1])
         s = get_settings()
@@ -2161,10 +2231,10 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         nav = []
         if has_prev:
-            nav.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"AD:USERS:{page-1}"))
-        nav.append(InlineKeyboardButton(f"📄 {page+1}", callback_data="AD:HOME"))
+            nav.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"AD:USERS:{page - 1}"))
+        nav.append(InlineKeyboardButton(f"📄 {page + 1}", callback_data="AD:HOME"))
         if has_next:
-            nav.append(InlineKeyboardButton("التالي ➡️", callback_data=f"AD:USERS:{page+1}"))
+            nav.append(InlineKeyboardButton("التالي ➡️", callback_data=f"AD:USERS:{page + 1}"))
         rows.append(nav)
         rows.append([InlineKeyboardButton("⬅️ رجوع", callback_data="AD:HOME")])
 
@@ -2211,7 +2281,6 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-
     if data.startswith("AD:TOGADMIN:"):
         _, _, uid_s, page_s = data.split(":")
         uid = int(uid_s)
@@ -2225,13 +2294,14 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             add_admin(uid)
             msg = "✅ تم تعيينه كأدمن."
-        await q.message.reply_text(msg, reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅️ رجوع للمستخدم", callback_data=f"AD:UINFO:{uid}:{page}")],
-            [InlineKeyboardButton("⬅️ رجوع للسجل", callback_data=f"AD:USERS:{page}")],
-            [InlineKeyboardButton("⬅️ الرئيسية", callback_data="AD:HOME")]
-        ]))
-        return
-
+        await q.message.reply_text(
+            msg,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ رجوع للمستخدم", callback_data=f"AD:UINFO:{uid}:{page}")],
+                [InlineKeyboardButton("⬅️ رجوع للسجل", callback_data=f"AD:USERS:{page}")],
+                [InlineKeyboardButton("⬅️ الرئيسية", callback_data="AD:HOME")]
+            ])
+        )
         return
 
     if data.startswith("AD:USERID:"):
@@ -2285,379 +2355,9 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=ik_admin_home()
         )
         return
-        if data == "AD:BACKUP":
-            # Create a zip backup of persistent data files and send it to admin.
-            try:
-                os.makedirs(BACKUP_DIR, exist_ok=True)
-                ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-                backup_path = os.path.join(BACKUP_DIR, f"backup-{ts}.zip")
 
-                # Which files/folders to include (only what matters for state)
-                include_paths = []
-                for p in [
-                    USERS_DB_PATH,
-                    WALLET_DB_PATH,
-                    ICHANCY_DB_PATH,
-                    HOLD_DB_PATH,
-                    POOL_DB_PATH,
-                    SETTINGS_DB_PATH,
-                    LOG_DB_PATH,
-                ]:
-                    if p and os.path.exists(p):
-                        include_paths.append(p)
-
-                # Also include any extra json/txt state files inside DATA_DIR (excluding backups)
-                if os.path.isdir(DATA_DIR):
-                    for root, dirs, files in os.walk(DATA_DIR):
-                        # avoid recursive backups
-                        if os.path.abspath(root).startswith(os.path.abspath(BACKUP_DIR)):
-                            continue
-                        for fn in files:
-                            if fn.lower().endswith((".json", ".txt")):
-                                fp = os.path.join(root, fn)
-                                if fp not in include_paths:
-                                    include_paths.append(fp)
-
-                with zipfile.ZipFile(backup_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                    for p in include_paths:
-                        # keep paths relative to DATA_DIR when possible
-                        try:
-                            arc = os.path.relpath(p, start=DATA_DIR)
-                        except Exception:
-                            arc = os.path.basename(p)
-                        zf.write(p, arcname=arc)
-
-                # retention
-                try:
-                    keep_n = max(1, int(os.getenv("BACKUP_KEEP", "30")))
-                    existing = sorted(
-                        [os.path.join(BACKUP_DIR, f) for f in os.listdir(BACKUP_DIR) if f.lower().endswith(".zip")],
-                        key=lambda x: os.path.getmtime(x),
-                    )
-                    if len(existing) > keep_n:
-                        for old in existing[: len(existing) - keep_n]:
-                            try:
-                                os.remove(old)
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-
-                await query.message.reply_document(
-                    document=open(backup_path, "rb"),
-                    filename=os.path.basename(backup_path),
-                    caption="🗄️ Backup جاهز",
-                )
-            except Exception as e:
-                await query.message.reply_text(f"❌ فشل إنشاء Backup: {e}")
-            return
-
-        
-        if data == "AD:RESTORE":
-            # Ask admin to send a backup zip (Document) to restore data files.
-            context.user_data["admin_mode"] = "RESTORE_WAIT_ZIP"
-            await q.message.reply_text(
-                "♻️ استعادة نسخة احتياطية\n\n"
-                "أرسل الآن ملف الـ Backup بصيغة ZIP (الذي تم إنشاؤه من زر Backup).\n"
-                "⚠️ سيتم استبدال بيانات البوت الحالية بالبيانات داخل الملف.\n\n"
-                "للإلغاء اضغط: ❌ إلغاء",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("❌ إلغاء", callback_data="AD:RESTORE:CANCEL")],
-                    [InlineKeyboardButton("⬅️ الرئيسية", callback_data="AD:HOME")],
-                ])
-            )
-            return
-
-        if data == "AD:RESTORE:CANCEL":
-            if context.user_data.get("admin_mode") == "RESTORE_WAIT_ZIP":
-                context.user_data.pop("admin_mode", None)
-            await q.message.reply_text("✅ تم إلغاء الاستعادة.", reply_markup=ik_admin_home())
-            return
-if data == "AD:MAINT":
-
-
-            m = get_maintenance()
-            if m.get("active"):
-                await maintenance_end(context, by=int(q.from_user.id))
-                await q.message.reply_text("✅ تم إيقاف الصيانة.", reply_markup=ik_admin_home())
-            else:
-                await maintenance_start(context, by=int(q.from_user.id))
-                await q.message.reply_text("🛠️ تم تفعيل الصيانة.", reply_markup=ik_admin_home())
-            return
-    
-    if data == "AD:EXPORT":
-        s = get_settings()
-        await q.message.reply_text(
-            "🧾 Export (مختصر):\n"
-            f"required_channel={REQUIRED_CHANNEL}\n"
-            f"settings={s}\n"
-            "files=[balances.json, orders.json, history.json, bans.json, admin_log.json, eishancy_accounts.json]",
-            reply_markup=ik_admin_home()
-        )
-        return
-
-    
-    if data == "AD:BCAST":
-        context.user_data["admin_mode"] = "BCAST_COPY_WAIT"
-        await q.message.reply_text(
-            "📣 رسالة جماعية (نسخ وإرسال)\n\n"
-            "أرسل الآن *أي رسالة* تريد توزيعها (نص/صورة/فيديو/ملف...).\n"
-            "سأقوم بنسخها وإرسالها إلى *غير المحظورين فقط*.\n"
-            "للإلغاء أرسل: إلغاء",
-            reply_markup=ik_admin_back(),
-            parse_mode="Markdown"
-        )
-        return
-
-
-    if data == "AD:BCAST:CANCEL":
-        context.user_data.pop("admin_mode", None)
-        context.user_data.pop("bcast_src_chat", None)
-        context.user_data.pop("bcast_src_mid", None)
-        await q.message.reply_text("✅ تم إلغاء الإرسال الجماعي.", reply_markup=ik_admin_home())
-        return
-
-    if data == "AD:BCAST:CONFIRM":
-        if context.user_data.get("admin_mode") != "BCAST_COPY_CONFIRM":
-            await q.message.reply_text("ℹ️ لا يوجد بث جاهز للتأكيد.", reply_markup=ik_admin_home())
-            return
-        src_chat = context.user_data.get("bcast_src_chat")
-        src_mid = context.user_data.get("bcast_src_mid")
-        if not src_chat or not src_mid:
-            await q.message.reply_text("❌ لم أجد رسالة المصدر للبث.", reply_markup=ik_admin_home())
-            context.user_data.pop("admin_mode", None)
-            return
-
-        uids = [u for u in get_all_user_ids() if not is_banned(u)[0]]
-        ok = 0
-        fail = 0
-        for uid in uids:
-            try:
-                await context.bot.copy_message(chat_id=uid, from_chat_id=src_chat, message_id=src_mid)
-                ok += 1
-            except Exception:
-                fail += 1
-                try:
-                    mark_user_inactive(uid)
-                except Exception:
-                    pass
-
-        admin_log({"ts": int(time.time()), "admin_id": int(q.from_user.id), "action": "broadcast_copy", "ok": ok, "fail": fail})
-        context.user_data.pop("admin_mode", None)
-        context.user_data.pop("bcast_src_chat", None)
-        context.user_data.pop("bcast_src_mid", None)
-        await q.message.reply_text(f"✅ تم إرسال البث.\nنجح: {ok} | فشل: {fail}", reply_markup=ik_admin_home())
-        return
-
-# تعديل بيانات إنشاء إيـشانسي
-    if data.startswith("OD:EDIT:"):
-        order_id = data.split(":")[2]
-        order = get_order(order_id)
-        if not order:
-            await q.message.reply_text("❌ الطلب غير موجود.", reply_markup=ik_admin_home())
-            return
-        if order.get("type") != "eish_create":
-            await q.message.reply_text("ℹ️ زر التعديل مخصص لطلبات إنشاء إيـشانسي فقط.", reply_markup=ik_admin_home())
-            return
-        context.user_data["admin_mode"] = f"EDITCREATE:{order_id}"
-        await q.message.reply_text(
-            "✏️ أرسل البيانات الجديدة بهذا الشكل:\n"
-            "username password\n\n"
-            "مثال:\nSleman123 Pass@123",
-            reply_markup=ik_admin_home()
-        )
-        return
-
-    # قبول/رفض
-    if data.startswith("OD:APPROVE:") or data.startswith("OD:REJECT:"):
-        action, order_id = data.split(":")[1], data.split(":")[2]
-        order = get_order(order_id)
-        if not order:
-            await q.message.reply_text("❌ الطلب غير موجود.", reply_markup=ik_admin_home())
-            return
-        if order.get("status") != "pending":
-            await q.message.reply_text(f"ℹ️ هذا الطلب حالته: {order.get('status')}", reply_markup=ik_admin_home())
-            return
-
-        uid = int(order["user_id"])
-        amount = int(order.get("amount", 0))
-        now = int(time.time())
-        acting_admin = int(q.from_user.id)
-
-        banned, _ = is_banned(uid)
-        if banned and action == "APPROVE":
-            await q.message.reply_text("⛔ المستخدم محظور. لا يمكن القبول.", reply_markup=ik_admin_home())
-            return
-
-        # APPROVE
-        if action == "APPROVE":
-            if order["type"] == "bot_topup":
-                adjust_wallet(uid, delta_balance=+amount)
-                update_order(order_id, {"status": "approved", "approved_at": now, "admin_id": acting_admin})
-                await cleanup_order_admin_messages(context, get_order(order_id) or order)
-                add_history(uid, {"ts": now, "event": "approved", "type": "bot_topup", "order_id": order_id, "amount": amount})
-                admin_log({"ts": now, "admin_id": acting_admin, "action": "approve_bot_topup", "order_id": order_id, "uid": uid, "amount": amount})
-                b, h = get_wallet(uid)
-                await q.message.reply_text(f"✅ تم قبول {order_id} وإضافة الرصيد.", reply_markup=ik_admin_home())
-                await context.bot.send_message(chat_id=uid, text=f"✅ تم قبول طلب الشحن.\nالمبلغ: {amount}\nرصيدك الآن: {b}\n⏳ محجوز: {h}")
-                return
-
-            if order["type"] == "bot_withdraw":
-                adjust_wallet(uid, delta_hold=-amount)
-                update_order(order_id, {"status": "approved", "approved_at": now, "admin_id": acting_admin})
-                await cleanup_order_admin_messages(context, get_order(order_id) or order)
-                add_history(uid, {"ts": now, "event": "approved", "type": "bot_withdraw", "order_id": order_id, "amount": amount})
-                admin_log({"ts": now, "admin_id": acting_admin, "action": "approve_bot_withdraw", "order_id": order_id, "uid": uid, "amount": amount})
-                b, h = get_wallet(uid)
-                await q.message.reply_text(f"✅ تم قبول {order_id} (تم تثبيت الخصم).", reply_markup=ik_admin_home())
-                await context.bot.send_message(chat_id=uid, text=f"✅ تم قبول طلب السحب.\nالمبلغ: {amount}\nرصيدك الآن: {b}\n⏳ محجوز: {h}")
-                return
-
-            if order["type"] == "eish_topup":
-                adjust_wallet(uid, delta_hold=-amount)
-                update_order(order_id, {"status": "approved", "approved_at": now, "admin_id": acting_admin})
-                await cleanup_order_admin_messages(context, get_order(order_id) or order)
-                add_history(uid, {"ts": now, "event": "approved", "type": "eish_topup", "order_id": order_id, "amount": amount})
-                admin_log({"ts": now, "admin_id": acting_admin, "action": "approve_eish_topup", "order_id": order_id, "uid": uid, "amount": amount})
-                b, h = get_wallet(uid)
-                await q.message.reply_text(f"✅ تم قبول {order_id} وتثبيت الخصم.", reply_markup=ik_admin_home())
-                await context.bot.send_message(chat_id=uid, text=f"✅ تم قبول شحن إيـشانسي.\nالمبلغ: {amount}\nرصيدك الآن: {b}\n⏳ محجوز: {h}")
-                return
-
-            if order["type"] == "eish_withdraw_to_bot":
-                adjust_wallet(uid, delta_balance=+amount)
-                update_order(order_id, {"status": "approved", "approved_at": now, "admin_id": acting_admin})
-                await cleanup_order_admin_messages(context, get_order(order_id) or order)
-                add_history(uid, {"ts": now, "event": "approved", "type": "eish_withdraw_to_bot", "order_id": order_id, "amount": amount})
-                admin_log({"ts": now, "admin_id": acting_admin, "action": "approve_eish_withdraw_to_bot", "order_id": order_id, "uid": uid, "amount": amount})
-                b, h = get_wallet(uid)
-                await q.message.reply_text(f"✅ تم قبول {order_id} وتمت إضافة الرصيد.", reply_markup=ik_admin_home())
-                await context.bot.send_message(chat_id=uid, text=f"✅ تم قبول السحب من إيـشانسي.\nتمت إضافة: {amount}\nرصيدك الآن: {b}\n⏳ محجوز: {h}")
-                return
-
-            if order["type"] == "eish_create":
-                if get_eish(uid):
-                    await q.message.reply_text("⚠️ هذا المستخدم لديه حساب محفوظ بالفعل. ارفض الطلب أو احذف الحساب يدويًا.", reply_markup=ik_admin_home())
-                    return
-
-                u = safe_text(order.get("eish_username"))
-                p = safe_text(order.get("eish_password"))
-                if not u or not p:
-                    await q.message.reply_text("❌ بيانات الحساب ناقصة. عدّل الطلب أولاً.", reply_markup=ik_admin_home())
-                    return
-
-                set_eish(uid, u, p)
-                update_order(order_id, {"status": "approved", "approved_at": now, "admin_id": acting_admin})
-                await cleanup_order_admin_messages(context, get_order(order_id) or order)
-                add_history(uid, {"ts": now, "event": "approved", "type": "eish_create", "order_id": order_id, "amount": 0})
-                admin_log({"ts": now, "admin_id": acting_admin, "action": "approve_eish_create", "order_id": order_id, "uid": uid})
-
-                await q.message.reply_text(f"✅ تم قبول {order_id} وحفظ الحساب.", reply_markup=ik_admin_home())
-                await context.bot.send_message(
-                    chat_id=uid,
-                    text=(
-                        "✅ تم اعتماد حساب إيـشانسي الخاص بك.\n\n"
-                        f"👤 Username: {u}\n"
-                        f"🔑 Password: {p}\n\n"
-                        "يمكنك الآن استخدام شحن/سحب إيـشانسي."
-                    )
-                )
-                return
-
-        # REJECT
-        if action == "REJECT":
-            if order["type"] in ("bot_topup", "eish_withdraw_to_bot", "eish_create"):
-                update_order(order_id, {"status": "rejected", "rejected_at": now, "admin_id": acting_admin})
-                await cleanup_order_admin_messages(context, get_order(order_id) or order)
-                add_history(uid, {"ts": now, "event": "rejected", "type": order["type"], "order_id": order_id, "amount": amount})
-                admin_log({"ts": now, "admin_id": acting_admin, "action": f"reject_{order['type']}", "order_id": order_id, "uid": uid, "amount": amount})
-                await q.message.reply_text(f"❌ تم رفض {order_id}.", reply_markup=ik_admin_home())
-                await context.bot.send_message(chat_id=uid, text=f"❌ تم رفض طلبك.\nOrderID: {order_id}\nإذا كنت ترى خطأ، تواصل مع الدعم.")
-                return
-
-            if order["type"] in ("bot_withdraw", "eish_topup"):
-                try:
-                    adjust_wallet(uid, delta_hold=-amount, delta_balance=+amount)
-                except Exception:
-                    pass
-                update_order(order_id, {"status": "rejected", "rejected_at": now, "admin_id": ADMIN_ID})
-                await cleanup_order_admin_messages(context, get_order(order_id) or order)
-                add_history(uid, {"ts": now, "event": "rejected", "type": order["type"], "order_id": order_id, "amount": amount})
-                admin_log({"ts": now, "admin_id": ADMIN_ID, "action": f"reject_{order['type']}", "order_id": order_id, "uid": uid, "amount": amount})
-                b, h = get_wallet(uid)
-                await q.message.reply_text(f"❌ تم رفض {order_id} وإرجاع الرصيد.", reply_markup=ik_admin_home())
-                await context.bot.send_message(chat_id=uid, text=f"❌ تم رفض طلبك.\nتم إرجاع المبلغ: {amount}\nرصيدك الآن: {b}\n⏳ محجوز: {h}")
-                return
-
-    if data.startswith("OD:USER:"):
-        order_id = data.split(":")[2]
-        order = get_order(order_id)
-        if not order:
-            await q.message.reply_text("❌ الطلب غير موجود.", reply_markup=ik_admin_home())
-            return
-        uid = int(order["user_id"])
-        b, h = get_wallet(uid)
-        banned, reason = is_banned(uid)
-        e = get_eish(uid)
-        e_name = e.get("username") if e else "-"
-
-        context.user_data["admin_mode"] = f"USERCTX:{uid}"
-        await q.message.reply_text(
-            f"👤 المستخدم:\nUID: {uid}\n💰 Balance: {b}\n⏳ Hold: {h}\n"
-            f"🧾 Eishancy: {e_name}\n"
-            f"🚫 Banned: {banned}\nReason: {reason or '-'}\n\n"
-            "أوامر تحكم:\nADJ +1000 سبب\nADJ -500 سبب\nBAN السبب\nUNBAN\nHIST",
-            reply_markup=ik_admin_home()
-        )
-        return
-
-    if data.startswith("OD:HIST:"):
-        order_id = data.split(":")[2]
-        order = get_order(order_id)
-        if not order:
-            await q.message.reply_text("❌ الطلب غير موجود.", reply_markup=ik_admin_home())
-            return
-        uid = int(order["user_id"])
-        hist = get_history(uid)[-10:]
-        lines = [f"🧾 آخر 10 سجلات للمستخدم UID:{uid}:"]
-        for e in hist:
-            ts = int(e.get("ts", 0))
-            dt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)) if ts else "-"
-            lines.append(f"- {e.get('event')} | {e.get('type')} | {e.get('order_id')} | {e.get('amount')} | {dt}")
-        await q.message.reply_text("\n".join(lines), reply_markup=ik_admin_home())
-        return
-
-# =========================
-# Admin text handler (ONLY admin)
-# =========================
-
-async def admin_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle non-text admin messages for broadcast copy flow."""
-    if not is_admin(update.effective_user.id):
-        return
-    mode = context.user_data.get("admin_mode", "")
-    if mode != "BCAST_COPY_WAIT":
-        return
-    # accept any message type (photo/video/document/etc)
-    src_chat = update.effective_chat.id
-    src_mid = update.effective_message.message_id
-    context.user_data["bcast_src_chat"] = src_chat
-    context.user_data["bcast_src_mid"] = src_mid
-    context.user_data["admin_mode"] = "BCAST_COPY_CONFIRM"
-
-    uids = [u for u in get_all_user_ids() if not is_banned(u)[0]]
-    await update.message.reply_text(
-        f"📣 معاينة البث\n\n"
-        f"سيتم إرسال *نسخة* من الرسالة أعلاه إلى: *{len(uids)}* مستخدم (غير محظور).\n\n"
-        f"اضغط (✅ إرسال) للبدء أو (❌ إلغاء).",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ إرسال", callback_data="AD:BCAST:CONFIRM")],
-            [InlineKeyboardButton("❌ إلغاء", callback_data="AD:BCAST:CANCEL")],
-            [InlineKeyboardButton("⬅️ الرئيسية", callback_data="AD:HOME")],
-        ]),
-        parse_mode="Markdown"
-    )
-
+    # Unknown callback -> ignore safely
+    return
 async def admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
@@ -3183,3 +2883,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
