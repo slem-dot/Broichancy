@@ -2847,7 +2847,6 @@ def build_app():
         ],
         allow_reentry=True,
     )
-    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, admin_any), group=0)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text), group=0)
     app.add_handler(MessageHandler(filters.Document.ALL, admin_document), group=0)
 
