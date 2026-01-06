@@ -29,6 +29,7 @@ pip install python-telegram-bot==21.6
 import json
 import os
 import time
+import zipfile
 from difflib import SequenceMatcher
 import asyncio
 import re
@@ -89,12 +90,16 @@ HISTORY_FILE  = os.path.join(DATA_DIR, "history.json")
 ADMINLOG_FILE = os.path.join(DATA_DIR, "admin_log.json")
 BANS_FILE     = os.path.join(DATA_DIR, "bans.json")
 SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
+MAINT_FILE    = os.path.join(DATA_DIR, "maintenance.json")
+BACKUP_DIR    = os.path.join(DATA_DIR, "backups")
+os.makedirs(BACKUP_DIR, exist_ok=True)
 EISH_FILE     = os.path.join(DATA_DIR, "eishancy_accounts.json")
 EISH_POOL_FILE = os.path.join(DATA_DIR, "eishancy_pool.json")  # list of {username,password,status,assigned_to,assigned_at}
 REF_FILE       = os.path.join(DATA_DIR, "referrals.json")      # {referrer_id: {points:int, referrals:int, referred:[uids]}}  # {uid:{username,password,created_at}}
 
 DEFAULT_SETTINGS = {
     "syriatel_code": "23547",
+    "syriatel_codes": ["23547"],
     "min_topup": 15000,
     "min_withdraw": 50000,
     "max_pending": 1,
@@ -145,8 +150,9 @@ CB_CHECK_JOIN = "JOIN:CHECK"
     ST_WITHDRAW_METHOD,
     ST_WITHDRAW_NUMBER,
     ST_AMOUNT,
+    ST_TOPUP_CODE,
     ST_CONFIRM,
-) = range(11)
+) = range(12)
 
 # =========================
 # JSON Helpers (بدون recursion)
@@ -160,6 +166,7 @@ def _ensure_data_files():
         (ADMINLOG_FILE, []),
         (BANS_FILE, {}),
         (SETTINGS_FILE, DEFAULT_SETTINGS),
+        (MAINT_FILE, {"active": False, "since": None, "by": None}),
         (EISH_FILE, {}),
         (EISH_POOL_FILE, []),
         (REF_FILE, {}),
@@ -204,6 +211,13 @@ def get_settings() -> Dict[str, Any]:
     merged["max_pending"] = int(merged["max_pending"])
     merged["admin_page_size"] = int(merged["admin_page_size"])
     merged["syriatel_code"] = str(merged["syriatel_code"]).strip()
+    # دعم أكثر من كود تحويل
+    codes = merged.get("syriatel_codes")
+    if not isinstance(codes, list) or not codes:
+        codes = [merged["syriatel_code"]]
+    codes = [str(x).strip() for x in codes if str(x).strip()]
+    merged["syriatel_codes"] = codes
+    merged["syriatel_code"] = codes[0]
 
     _save_json(SETTINGS_FILE, merged)
     return merged
@@ -213,6 +227,66 @@ def set_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
     s.update(updates)
     _save_json(SETTINGS_FILE, s)
     return s
+
+
+# =========================
+# Maintenance
+# =========================
+def get_maintenance() -> Dict[str, Any]:
+    m = _load_json(MAINT_FILE)
+    if not isinstance(m, dict):
+        m = {"active": False, "since": None, "by": None}
+    m.setdefault("active", False)
+    m.setdefault("since", None)
+    m.setdefault("by", None)
+    return m
+
+def set_maintenance(active: bool, by: int | None = None) -> Dict[str, Any]:
+    m = get_maintenance()
+    m["active"] = bool(active)
+    if active:
+        m["since"] = int(time.time())
+        m["by"] = int(by or 0)
+    else:
+        m["since"] = None
+        m["by"] = None
+    _save_json(MAINT_FILE, m)
+    return m
+
+async def broadcast_to_users(context: ContextTypes.DEFAULT_TYPE, text: str):
+    uids = [u for u in get_all_user_ids() if not is_banned(u)[0]]
+    for uid in uids:
+        try:
+            await context.bot.send_message(chat_id=uid, text=text)
+        except Exception:
+            try:
+                mark_user_inactive(uid)
+            except Exception:
+                pass
+
+async def maintenance_start(context: ContextTypes.DEFAULT_TYPE, by: int):
+    me = await context.bot.get_me()
+    bot_name = (me.first_name or "البوت").strip()
+    set_maintenance(True, by=by)
+    msg = (
+        f"🛠️ صيانة مؤقتة — {bot_name}\n\n"
+        "نقوم حاليًا بإجراء تحديثات تقنية لتحسين الأداء وضمان تجربة أفضل لكم.\n"
+        "⏳ قد لا تكون بعض الخدمات متاحة مؤقتًا.\n\n"
+        "نقدّر تفهّمكم 🤍"
+    )
+    await broadcast_to_users(context, msg)
+
+async def maintenance_end(context: ContextTypes.DEFAULT_TYPE, by: int):
+    me = await context.bot.get_me()
+    bot_name = (me.first_name or "البوت").strip()
+    set_maintenance(False, by=by)
+    msg = (
+        f"✅ تم الانتهاء من الصيانة — {bot_name}\n\n"
+        "البوت عاد للعمل بكامل طاقته 🚀\n"
+        "يمكنك الآن استخدام جميع الخدمات بشكل طبيعي.\n\n"
+        "شكرًا لصبركم 🤍"
+    )
+    await broadcast_to_users(context, msg)
 
 # =========================
 # Wallet
@@ -652,6 +726,15 @@ async def guard_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool
     if banned:
         await update.effective_message.reply_text(f"⛔ حسابك محظور.\nالسبب: {reason}")
         return False
+
+    # صيانة (يُسمح للأدمن فقط)
+    mnt = get_maintenance()
+    if mnt.get("active") and not is_admin(uid):
+        await update.effective_message.reply_text(
+            "🛠️ البوت تحت الصيانة مؤقتًا.\n"
+            "جرّب لاحقًا، وشكرًا لتفهمك 🤍"
+        )
+        return False
     if not await ensure_joined(update, context):
         return False
     ensure_user_registered(uid)
@@ -715,12 +798,12 @@ def kb_back():
     return ReplyKeyboardMarkup([[KeyboardButton(BTN_BACK)]], resize_keyboard=True)
 
 def kb_eish_actions():
+    # Grid layout (2 buttons per row) مع الحفاظ على نفس الأزرار ونفس الترتيب
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(BTN_MY_EISH)],
-            [KeyboardButton(BTN_CREATE), KeyboardButton(BTN_E_TOPUP)],
-            [KeyboardButton(BTN_E_WITH), KeyboardButton(BTN_E_DEL)],
-            [KeyboardButton(BTN_EISH_SITE)],
+            [KeyboardButton(BTN_MY_EISH), KeyboardButton(BTN_CREATE)],
+            [KeyboardButton(BTN_E_TOPUP), KeyboardButton(BTN_E_WITH)],
+            [KeyboardButton(BTN_E_DEL), KeyboardButton(BTN_EISH_SITE)],
             [KeyboardButton(BTN_BACK)]
         ],
         resize_keyboard=True
@@ -734,6 +817,21 @@ def kb_balance_menu():
         ],
         resize_keyboard=True
     )
+
+
+def kb_topup_codes():
+    s = get_settings()
+    codes = s.get("syriatel_codes") or [s.get("syriatel_code")]
+    rows = []
+    row = []
+    for c in codes:
+        row.append(KeyboardButton(str(c)))
+        if len(row) == 2:
+            rows.append(row); row=[]
+    if row:
+        rows.append(row)
+    rows.append([KeyboardButton(BTN_BACK)])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 def kb_methods():
     return ReplyKeyboardMarkup(
@@ -767,6 +865,7 @@ def ik_admin_home():
         [InlineKeyboardButton("👥 سجل المشتركين", callback_data="AD:USERS:0"),
          InlineKeyboardButton("📣 رسالة جماعية", callback_data="AD:BCAST")],
         [InlineKeyboardButton("🗂 مخزون إيـشانسي", callback_data="AD:EPOOL")],
+        [InlineKeyboardButton("🗄️ Backup", callback_data="AD:BACKUP"), InlineKeyboardButton("🛠️ صيانة", callback_data="AD:MAINT")] ,
         [InlineKeyboardButton("🧾 تصدير مختصر", callback_data="AD:EXPORT")]
     ])
 
@@ -1254,6 +1353,35 @@ async def topup_get_txid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ST_AMOUNT
 
 # ------- Withdraw (bot) -------
+async def topup_choose_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await guard_user(update, context):
+        return ConversationHandler.END
+
+    text = safe_text(update.message.text)
+    if text == BTN_BACK:
+        return await go_home(update, context)
+
+    s = get_settings()
+    codes = s.get("syriatel_codes") or [s.get("syriatel_code")]
+    if text not in [str(c) for c in codes]:
+        await update.message.reply_text("❌ اختر كود تحويل صحيح من القائمة:", reply_markup=kb_topup_codes())
+        return ST_TOPUP_CODE
+
+    context.user_data["syriatel_code"] = str(text).strip()
+
+    amount = int(context.user_data.get("amount", 0))
+    tx_id = context.user_data.get("tx_id")
+    context.user_data["confirm_text"] = (
+        "هل تريد تأكيد طلب الشحن؟\n\n"
+        "الطريقة: سيرياتيل كاش\n"
+        f"كود التحويل: {context.user_data['syriatel_code']}\n"
+        f"رقم العملية: {tx_id}\n"
+        f"المبلغ: {amount}"
+    )
+    await update.message.reply_text(context.user_data["confirm_text"], reply_markup=kb_confirm())
+    return ST_CONFIRM
+
+
 async def withdraw_choose_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await guard_user(update, context):
         return ConversationHandler.END
@@ -2081,6 +2209,40 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    
+    if data == "AD:BACKUP":
+        # تنفيذ backup سريع (zip لكل data) وإرساله للأدمن
+        await maintenance_start(context, by=int(q.from_user.id))
+        ts = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+        backup_name = f"backup-{ts}.zip"
+        backup_path = os.path.join(BACKUP_DIR, backup_name)
+        try:
+            with zipfile.ZipFile(backup_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for root, _, files in os.walk(DATA_DIR):
+                    for fn in files:
+                        if fn.endswith(".tmp"):
+                            continue
+                        p = os.path.join(root, fn)
+                        arc = os.path.relpath(p, DATA_DIR)
+                        zf.write(p, arcname=arc)
+                        await context.bot.send_document(chat_id=q.from_user.id, document=open(backup_path, "rb"), filename=backup_name, caption="🗄️ Backup جاهز")
+            await q.message.reply_text("✅ تم إنشاء Backup وإرساله لك.", reply_markup=ik_admin_home())
+        except Exception as e:
+            await q.message.reply_text(f"❌ فشل إنشاء Backup: {e}", reply_markup=ik_admin_home())
+        finally:
+            await maintenance_end(context, by=int(q.from_user.id))
+        return
+
+    if data == "AD:MAINT":
+        m = get_maintenance()
+        if m.get("active"):
+            await maintenance_end(context, by=int(q.from_user.id))
+            await q.message.reply_text("✅ تم إيقاف الصيانة.", reply_markup=ik_admin_home())
+        else:
+            await maintenance_start(context, by=int(q.from_user.id))
+            await q.message.reply_text("🛠️ تم تفعيل الصيانة.", reply_markup=ik_admin_home())
+        return
+
     if data == "AD:EXPORT":
         s = get_settings()
         await q.message.reply_text(
@@ -2326,6 +2488,34 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 # Admin text handler (ONLY admin)
 # =========================
+
+async def admin_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle non-text admin messages for broadcast copy flow."""
+    if not is_admin(update.effective_user.id):
+        return
+    mode = context.user_data.get("admin_mode", "")
+    if mode != "BCAST_COPY_WAIT":
+        return
+    # accept any message type (photo/video/document/etc)
+    src_chat = update.effective_chat.id
+    src_mid = update.effective_message.message_id
+    context.user_data["bcast_src_chat"] = src_chat
+    context.user_data["bcast_src_mid"] = src_mid
+    context.user_data["admin_mode"] = "BCAST_COPY_CONFIRM"
+
+    uids = [u for u in get_all_user_ids() if not is_banned(u)[0]]
+    await update.message.reply_text(
+        f"📣 معاينة البث\n\n"
+        f"سيتم إرسال *نسخة* من الرسالة أعلاه إلى: *{len(uids)}* مستخدم (غير محظور).\n\n"
+        f"اضغط (✅ إرسال) للبدء أو (❌ إلغاء).",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ إرسال", callback_data="AD:BCAST:CONFIRM")],
+            [InlineKeyboardButton("❌ إلغاء", callback_data="AD:BCAST:CANCEL")],
+            [InlineKeyboardButton("⬅️ الرئيسية", callback_data="AD:HOME")],
+        ]),
+        parse_mode="Markdown"
+    )
+
 async def admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
@@ -2698,6 +2888,7 @@ def build_app():
             ST_WITHDRAW_METHOD: [MessageHandler(user_text_filter, withdraw_choose_method)],
             ST_WITHDRAW_NUMBER: [MessageHandler(user_text_filter, withdraw_get_number)],
             ST_AMOUNT: [MessageHandler(user_text_filter, get_amount)],
+            ST_TOPUP_CODE: [MessageHandler(user_text_filter, topup_choose_code)],
             ST_CONFIRM: [MessageHandler(user_text_filter, confirm)],
         },
         fallbacks=[
@@ -2706,6 +2897,7 @@ def build_app():
         ],
         allow_reentry=True,
     )
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, admin_any), group=0)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text), group=0)
 
     app.add_handler(user_conv, group=1)
