@@ -1,1 +1,5 @@
-python-telegram-bot==20.7
+python-telegram-bot==21.6
+selenium==4.15.0
+undetected-chromedriver==3.5.4
+webdriver-manager==4.0.1
+cryptography==41.0.7
