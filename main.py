@@ -1,29 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-SlsurveyBot — نسخة نهائية احترافية (مستخدم + أدمن) + اشتراك إجباري
-
-✅ اشتراك إجباري بقناة: @broichancy
-- زر: ✅ اشترك بالقناة
-- زر: 🔄 تحقق من الاشتراك
-
-✅ Wallet: Balance + Hold (مع حماية من السالب)
-✅ شحن رصيد البوت: سيرياتيل كاش فقط (كود 23547) => رقم عملية => مبلغ >= 15000 => طلب للأدمن
-✅ سحب رصيد البوت: سيرياتيل كاش فقط => رقم مستلم => مبلغ >= 50000 => حجز فوري (Balance- , Hold+) => الأدمن
-✅ عند رفض السحب/شحن إيـشانسي: يرجع الرصيد تلقائيًا
-
-✅ حساب إيـشانسي:
-- إنشاء حساب: يُرسل طلب للأدمن مع (username/password) + الأدمن يستطيع "تعديل" ثم "قبول"
-- عند قبول الأدمن: يتم حفظ الحساب للمستخدم (مرة واحدة فقط)
-- منع إنشاء أكثر من حساب (إذا لديه حساب محفوظ)
-- شحن إيـشانسي: يتأكد من وجود حساب + رصيد كافي + حجز فوري، وعند القبول تثبيت الخصم
-- سحب من إيـشانسي إلى رصيد البوت: يتأكد من وجود حساب، وعند القبول يضاف الرصيد للمستخدم
-
-✅ منع أكثر من طلب معلّق للمستخدم
-✅ JSON تخزين كامل
-✅ لوحة أدمن Inline احترافية + تعديل بيانات إنشاء إيـشانسي
-
-المتطلبات:
-pip install python-telegram-bot==21.6
+بوت الخدمات المالية المتكامل مع التحقق الآلي من سيرياتيل كاش
+نسخة Railway الجاهزة مع نظام منع التكرار
 """
 
 import json
@@ -31,12 +9,27 @@ import os
 import shutil
 import tempfile
 import time
+import threading
 from datetime import datetime
 import zipfile
 from difflib import SequenceMatcher
 import asyncio
 import re
+import random
+import sys
 from typing import Dict, Any, Optional, List, Tuple
+
+# === مكتبات التحقق الآلي ===
+try:
+    from selenium import webdriver
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    import undetected_chromedriver as uc
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    SELENIUM_AVAILABLE = False
+    print("⚠️ تنبيه: Selenium غير مثبت. سيتم تعطيل التحقق الآلي.")
 
 from telegram import (
     Update,
@@ -60,119 +53,37 @@ from telegram.ext import (
 # =========================
 # إعدادات أساسية
 # =========================
-TOKEN = (os.getenv("BOT_TOKEN") or os.getenv("TOKEN") or "").strip()
-
+TOKEN = os.getenv("BOT_TOKEN", "").strip()
 if not TOKEN:
-
-    raise RuntimeError("BOT_TOKEN (or TOKEN) env var is required")
+    raise RuntimeError("❌ BOT_TOKEN مطلوب في Environment Variables")
 
 SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "0") or "0")
 if not SUPER_ADMIN_ID:
-    raise RuntimeError("SUPER_ADMIN_ID env var is required (your Telegram numeric ID)")
-ADMIN_ID = SUPER_ADMIN_ID
-  # السوبر أدمن (يستطيع تعيين/إزالة أدمن)
-# DATA_DIR (persistent storage)
-# On Railway you should mount a Volume to /app/data and set DATA_DIR=/app/data
-DATA_DIR = (os.getenv("DATA_DIR") or "/app/data").strip() or "/app/data"
-try:
-    os.makedirs(DATA_DIR, exist_ok=True)
-except Exception:
-    # Fallback to local relative dir if /app/data isn't writable (e.g. local dev)
-    DATA_DIR = "data"
-    os.makedirs(DATA_DIR, exist_ok=True)
+    raise RuntimeError("❌ SUPER_ADMIN_ID مطلوب")
 
-ADMINS_FILE   = os.path.join(DATA_DIR, "admins.json")
-USERS_FILE    = os.path.join(DATA_DIR, "users.json")
-# ✅ قناة الاشتراك الإجباري
+DATA_DIR = os.getenv("DATA_DIR", "/app/data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# تعريفات الملفات
+ADMINS_FILE = os.path.join(DATA_DIR, "admins.json")
+USERS_FILE = os.path.join(DATA_DIR, "users.json")
 REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@broichancy")
 REQUIRED_CHANNEL_URL = "https://t.me/broichancy"
-
 BALANCES_FILE = os.path.join(DATA_DIR, "balances.json")
-ORDERS_FILE   = os.path.join(DATA_DIR, "orders.json")
-HISTORY_FILE  = os.path.join(DATA_DIR, "history.json")
+ORDERS_FILE = os.path.join(DATA_DIR, "orders.json")
+HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
 ADMINLOG_FILE = os.path.join(DATA_DIR, "admin_log.json")
-BANS_FILE     = os.path.join(DATA_DIR, "bans.json")
+BANS_FILE = os.path.join(DATA_DIR, "bans.json")
 SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
-MAINT_FILE    = os.path.join(DATA_DIR, "maintenance.json")
-BACKUP_DIR    = os.path.join(DATA_DIR, "backups")
+MAINT_FILE = os.path.join(DATA_DIR, "maintenance.json")
+BACKUP_DIR = os.path.join(DATA_DIR, "backups")
+EISH_FILE = os.path.join(DATA_DIR, "eishancy_accounts.json")
+EISH_POOL_FILE = os.path.join(DATA_DIR, "eishancy_pool.json")
+REF_FILE = os.path.join(DATA_DIR, "referrals.json")
+SYRIATEL_ACCOUNTS_FILE = os.path.join(DATA_DIR, "syriatel_accounts.json")
+VERIFIED_TX_FILE = os.path.join(DATA_DIR, "verified_transactions.json")
+
 os.makedirs(BACKUP_DIR, exist_ok=True)
-
-# ---- Auto Backup (JobQueue) ----
-AUTO_BACKUP_HOURS = float(os.getenv("AUTO_BACKUP_HOURS", "0") or "0")  # 0 = disabled
-BACKUP_KEEP = int(os.getenv("BACKUP_KEEP", "30") or "30")
-
-async def auto_backup_job(context: ContextTypes.DEFAULT_TYPE):
-    """Periodic backup job: saves a zip to BACKUP_DIR and sends it to admins."""
-    if AUTO_BACKUP_HOURS <= 0:
-        return
-    try:
-        os.makedirs(BACKUP_DIR, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-        backup_path = os.path.join(BACKUP_DIR, f"auto-backup-{ts}.zip")
-
-        include_paths = []
-        for p in [
-            USERS_DB_PATH,
-            WALLET_DB_PATH,
-            ICHANCY_DB_PATH,
-            HOLD_DB_PATH,
-            POOL_DB_PATH,
-            SETTINGS_DB_PATH,
-            LOG_DB_PATH,
-        ]:
-            if p and os.path.exists(p):
-                include_paths.append(p)
-
-        if os.path.isdir(DATA_DIR):
-            for root, dirs, files in os.walk(DATA_DIR):
-                if os.path.abspath(root).startswith(os.path.abspath(BACKUP_DIR)):
-                    continue
-                for fn in files:
-                    if fn.lower().endswith((".json", ".txt")):
-                        fp = os.path.join(root, fn)
-                        if fp not in include_paths:
-                            include_paths.append(fp)
-
-        with zipfile.ZipFile(backup_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for p in include_paths:
-                try:
-                    arc = os.path.relpath(p, start=DATA_DIR)
-                except Exception:
-                    arc = os.path.basename(p)
-                zf.write(p, arcname=arc)
-
-        # retention
-        try:
-            keep_n = max(1, int(BACKUP_KEEP))
-            existing = sorted(
-                [os.path.join(BACKUP_DIR, f) for f in os.listdir(BACKUP_DIR) if f.lower().endswith(".zip")],
-                key=lambda x: os.path.getmtime(x),
-            )
-            if len(existing) > keep_n:
-                for old in existing[: len(existing) - keep_n]:
-                    try:
-                        os.remove(old)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
-        # send to admins
-        for admin_id in ADMIN_IDS:
-            try:
-                await context.bot.send_document(
-                    chat_id=admin_id,
-                    document=open(backup_path, "rb"),
-                    filename=os.path.basename(backup_path),
-                    caption="🗄️ Auto Backup جاهز",
-                )
-            except Exception:
-                pass
-    except Exception:
-        pass
-EISH_FILE     = os.path.join(DATA_DIR, "eishancy_accounts.json")
-EISH_POOL_FILE = os.path.join(DATA_DIR, "eishancy_pool.json")  # list of {username,password,status,assigned_to,assigned_at}
-REF_FILE       = os.path.join(DATA_DIR, "referrals.json")      # {referrer_id: {points:int, referrals:int, referred:[uids]}}  # {uid:{username,password,created_at}}
 
 DEFAULT_SETTINGS = {
     "syriatel_code": "23547",
@@ -180,59 +91,18 @@ DEFAULT_SETTINGS = {
     "min_topup": 15000,
     "min_withdraw": 50000,
     "max_pending": 1,
-    "admin_page_size": 6
+    "admin_page_size": 6,
+    "auto_verify_enabled": False,
+    "auto_verify_interval": 300,
+    "max_auto_amount": 100000,
+    "syriatel_username": "",
+    "syriatel_password": "",
+    "syriatel_cash_code": "23547",
+    "auto_login_enabled": False
 }
 
 # =========================
-# أزرار المستخدم
-# =========================
-BTN_EISHANCY = "حساب ايشانسي"
-BTN_BALANCE  = "رصيدي"
-BTN_REFERRALS = "🎁 الإحالات"
-BTN_BACK     = "⬅️ رجوع"
-
-BTN_MY_EISH  = "👤 حسابي"
-BTN_CREATE   = "🆕 إنشاء حساب"
-BTN_E_TOPUP  = "💳 شحن إيـشانسي"
-BTN_E_WITH   = "💸 سحب من إيـشانسي"
-BTN_E_DEL    = "🗑️ حذف الحساب"
-BTN_EISH_SITE = "🌐 موقع iChancy"
-
-BTN_BOT_TOPUP    = "شحن رصيد في البوت"
-BTN_BOT_WITHDRAW = "سحب رصيد من البوت"
-
-BTN_SYRIATEL = "سيرياتيل كاش"
-BTN_SHAM     = "شام كاش"
-
-BTN_CONFIRM  = "✅ تأكيد"
-BTN_CANCEL   = "❌ إلغاء"
-
-
-# =========================
-# Callback (اشتراك إجباري)
-# =========================
-CB_CHECK_JOIN = "JOIN:CHECK"
-
-# =========================
-# حالات المحادثة (User)
-# =========================
-(
-    ST_MAIN,
-    ST_EISH_ACTION,
-    ST_E_USER,
-    ST_E_PASS,
-    ST_BAL_MENU,
-    ST_TOPUP_METHOD,
-    ST_TOPUP_TXID,
-    ST_WITHDRAW_METHOD,
-    ST_WITHDRAW_NUMBER,
-    ST_AMOUNT,
-    ST_TOPUP_CODE,
-    ST_CONFIRM,
-) = range(12)
-
-# =========================
-# JSON Helpers (بدون recursion)
+# دوال المساعدة للـ JSON
 # =========================
 def _ensure_data_files():
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -247,8 +117,10 @@ def _ensure_data_files():
         (EISH_FILE, {}),
         (EISH_POOL_FILE, []),
         (REF_FILE, {}),
-        (USERS_FILE, {}),  # {uid: {username, first_name, last_name, joined_at, last_seen, active}}
-        (ADMINS_FILE, {"super_admin": int(SUPER_ADMIN_ID), "admins": [int(SUPER_ADMIN_ID)]}),
+        (USERS_FILE, {}),
+        (ADMINS_FILE, {"super_admin": SUPER_ADMIN_ID, "admins": [SUPER_ADMIN_ID]}),
+        (SYRIATEL_ACCOUNTS_FILE, []),
+        (VERIFIED_TX_FILE, {}),
     ]
     for path, default in files:
         if not os.path.exists(path):
@@ -275,28 +147,13 @@ def _save_json(path: str, data):
     os.replace(tmp, path)
 
 # =========================
-# Settings
+# إعدادات
 # =========================
 def get_settings() -> Dict[str, Any]:
     s = _load_json(SETTINGS_FILE)
     merged = DEFAULT_SETTINGS.copy()
     if isinstance(s, dict):
-        merged.update({k: s.get(k, merged[k]) for k in merged.keys()})
-
-    merged["min_topup"] = int(merged["min_topup"])
-    merged["min_withdraw"] = int(merged["min_withdraw"])
-    merged["max_pending"] = int(merged["max_pending"])
-    merged["admin_page_size"] = int(merged["admin_page_size"])
-    merged["syriatel_code"] = str(merged["syriatel_code"]).strip()
-    # دعم أكثر من كود تحويل
-    codes = merged.get("syriatel_codes")
-    if not isinstance(codes, list) or not codes:
-        codes = [merged["syriatel_code"]]
-    codes = [str(x).strip() for x in codes if str(x).strip()]
-    merged["syriatel_codes"] = codes
-    merged["syriatel_code"] = codes[0]
-
-    _save_json(SETTINGS_FILE, merged)
+        merged.update(s)
     return merged
 
 def set_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
@@ -305,68 +162,48 @@ def set_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
     _save_json(SETTINGS_FILE, s)
     return s
 
-
 # =========================
-# Maintenance
+# أدمن
 # =========================
-def get_maintenance() -> Dict[str, Any]:
-    m = _load_json(MAINT_FILE)
-    if not isinstance(m, dict):
-        m = {"active": False, "since": None, "by": None}
-    m.setdefault("active", False)
-    m.setdefault("since", None)
-    m.setdefault("by", None)
-    return m
+def get_admin_ids() -> List[int]:
+    obj = _load_json(ADMINS_FILE)
+    if not isinstance(obj, dict):
+        obj = {"super_admin": SUPER_ADMIN_ID, "admins": [SUPER_ADMIN_ID]}
+    obj.setdefault("super_admin", SUPER_ADMIN_ID)
+    obj.setdefault("admins", [SUPER_ADMIN_ID])
+    return [int(x) for x in obj.get("admins", [])]
 
-def set_maintenance(active: bool, by: int | None = None) -> Dict[str, Any]:
-    m = get_maintenance()
-    m["active"] = bool(active)
-    if active:
-        m["since"] = int(time.time())
-        m["by"] = int(by or 0)
-    else:
-        m["since"] = None
-        m["by"] = None
-    _save_json(MAINT_FILE, m)
-    return m
+ADMIN_IDS = get_admin_ids()
 
-async def broadcast_to_users(context: ContextTypes.DEFAULT_TYPE, text: str):
-    uids = [u for u in get_all_user_ids() if not is_banned(u)[0]]
-    for uid in uids:
+def is_admin(uid: int) -> bool:
+    return uid in set(get_admin_ids())
+
+def is_super_admin(uid: int) -> bool:
+    obj = _load_json(ADMINS_FILE)
+    try:
+        return int(uid) == int(obj.get("super_admin", SUPER_ADMIN_ID))
+    except Exception:
+        return False
+
+async def notify_admins(context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None, order_id: str | None = None):
+    admin_msgs = []
+    for aid in ADMIN_IDS:
         try:
-            await context.bot.send_message(chat_id=uid, text=text)
+            msg = await context.bot.send_message(chat_id=aid, text=text, reply_markup=reply_markup)
+            admin_msgs.append({"chat_id": aid, "message_id": msg.message_id})
         except Exception:
-            try:
-                mark_user_inactive(uid)
-            except Exception:
-                pass
-
-async def maintenance_start(context: ContextTypes.DEFAULT_TYPE, by: int):
-    me = await context.bot.get_me()
-    bot_name = (me.first_name or "البوت").strip()
-    set_maintenance(True, by=by)
-    msg = (
-        f"🛠️ صيانة مؤقتة — {bot_name}\n\n"
-        "نقوم حاليًا بإجراء تحديثات تقنية لتحسين الأداء وضمان تجربة أفضل لكم.\n"
-        "⏳ قد لا تكون بعض الخدمات متاحة مؤقتًا.\n\n"
-        "نقدّر تفهّمكم 🤍"
-    )
-    await broadcast_to_users(context, msg)
-
-async def maintenance_end(context: ContextTypes.DEFAULT_TYPE, by: int):
-    me = await context.bot.get_me()
-    bot_name = (me.first_name or "البوت").strip()
-    set_maintenance(False, by=by)
-    msg = (
-        f"✅ تم الانتهاء من الصيانة — {bot_name}\n\n"
-        "البوت عاد للعمل بكامل طاقته 🚀\n"
-        "يمكنك الآن استخدام جميع الخدمات بشكل طبيعي.\n\n"
-        "شكرًا لصبركم 🤍"
-    )
-    await broadcast_to_users(context, msg)
+            pass
+    if order_id and admin_msgs:
+        order = get_order(order_id) or {}
+        existing = order.get("admin_msgs") or []
+        if isinstance(existing, list):
+            existing.extend(admin_msgs)
+        else:
+            existing = admin_msgs
+        update_order(order_id, {"admin_msgs": existing})
 
 # =========================
-# Wallet
+# محفظة
 # =========================
 def get_wallet(uid: int) -> Tuple[int, int]:
     balances = _load_json(BALANCES_FILE)
@@ -388,33 +225,13 @@ def adjust_wallet(uid: int, delta_balance: int = 0, delta_hold: int = 0) -> Tupl
     return get_wallet(uid)
 
 # =========================
-# Users registry (ensure)
-# =========================
-def ensure_user_registered(uid: int) -> None:
-    """Ensure user appears in balances/history so broadcast & سجل المشتركين include them."""
-    uid_s = str(uid)
-    balances = _load_json(BALANCES_FILE)
-    if uid_s not in balances:
-        balances[uid_s] = {"balance": 0, "hold": 0}
-        _save_json(BALANCES_FILE, balances)
-    hist = _load_json(HISTORY_FILE)
-    if isinstance(hist, dict) and uid_s not in hist:
-        hist[uid_s] = []
-        _save_json(HISTORY_FILE, hist)
-
-# =========================
-# Eishancy Account
-# =========================
-
-# =========================
-# User profiles (persist username/seen for admin panel)
+# مستخدمين
 # =========================
 def get_user_profile(uid: int) -> Dict[str, Any]:
     users = _load_json(USERS_FILE)
     return users.get(str(uid), {})
 
 def upsert_user_profile(user) -> None:
-    """Persist minimal user info (called on any interaction)."""
     try:
         uid = int(user.id)
     except Exception:
@@ -442,239 +259,33 @@ def upsert_user_profile(user) -> None:
     users[key] = cur
     _save_json(USERS_FILE, users)
 
-def mark_user_inactive(uid: int) -> None:
-    users = _load_json(USERS_FILE)
-    key = str(uid)
-    cur = users.get(key, {"user_id": uid, "joined_at": int(time.time())})
-    cur["active"] = False
-    cur["last_seen"] = int(time.time())
-    users[key] = cur
-    _save_json(USERS_FILE, users)
-
-def set_user_active(uid: int) -> None:
-    users = _load_json(USERS_FILE)
-    key = str(uid)
-    cur = users.get(key, {"user_id": uid, "joined_at": int(time.time())})
-    cur["active"] = True
-    cur["last_seen"] = int(time.time())
-    users[key] = cur
-    _save_json(USERS_FILE, users)
-
-
-# =========================
-# Referrals (points)
-# =========================
-def _ref_obj() -> Dict[str, Any]:
-    return _load_json(REF_FILE)
-
-def get_points(uid: int) -> int:
-    users = _load_json(USERS_FILE)
-    return int(users.get(str(uid), {}).get("points", 0) or 0)
-
-def add_points(uid: int, delta: int) -> None:
-    users = _load_json(USERS_FILE)
-    key = str(uid)
-    cur = users.get(key, {"user_id": uid, "joined_at": int(time.time())})
-    cur["points"] = max(0, int(cur.get("points", 0) or 0) + int(delta))
-    users[key] = cur
-    _save_json(USERS_FILE, users)
-
-def add_referral(referrer_id: int, referred_id: int) -> bool:
-    """Grant referral once per referred user. Returns True if granted."""
-    if referrer_id == referred_id:
-        return False
-    users = _load_json(USERS_FILE)
-    rkey = str(referred_id)
-    cur = users.get(rkey)
-    if not cur:
-        # should exist, but be safe
-        cur = {"user_id": referred_id, "joined_at": int(time.time()), "points": 0, "referrals": 0, "referred_by": None}
-    if cur.get("referred_by") is not None:
-        return False
-    # mark referred_by
-    cur["referred_by"] = int(referrer_id)
-    users[rkey] = cur
-    _save_json(USERS_FILE, users)
-    # grant points to referrer
-    users2 = _load_json(USERS_FILE)
-    fkey = str(referrer_id)
-    fcur = users2.get(fkey, {"user_id": referrer_id, "joined_at": int(time.time()), "points": 0, "referrals": 0, "referred_by": None})
-    fcur["points"] = int(fcur.get("points", 0) or 0) + 10
-    fcur["referrals"] = int(fcur.get("referrals", 0) or 0) + 1
-    users2[fkey] = fcur
-    _save_json(USERS_FILE, users2)
-    return True
-
-def referral_link(bot_username: str, uid: int) -> str:
-    return f"https://t.me/{bot_username}?start=ref_{uid}"
+def get_all_user_ids() -> List[int]:
+    uids: set[int] = set()
+    def add_keys(d):
+        if isinstance(d, dict):
+            for k in d.keys():
+                if str(k).isdigit():
+                    uids.add(int(k))
+    add_keys(_load_json(BALANCES_FILE))
+    add_keys(_load_json(USERS_FILE))
+    add_keys(_load_json(HISTORY_FILE))
+    add_keys(_load_json(EISH_FILE))
+    add_keys(_load_json(BANS_FILE))
+    orders = _load_json(ORDERS_FILE)
+    if isinstance(orders, dict):
+        for o in orders.values():
+            try:
+                uids.add(int(o.get("user_id")))
+            except Exception:
+                pass
+    uids.discard(SUPER_ADMIN_ID)
+    return sorted(uids)
 
 # =========================
-# Admins (multi-admin)
-# =========================
-def _load_admins_obj() -> Dict[str, Any]:
-    obj = _load_json(ADMINS_FILE)
-    # normalize
-    if not isinstance(obj, dict):
-        obj = {"super_admin": int(SUPER_ADMIN_ID), "admins": [int(SUPER_ADMIN_ID)]}
-    obj.setdefault("super_admin", int(SUPER_ADMIN_ID))
-    obj.setdefault("admins", [int(obj.get("super_admin", SUPER_ADMIN_ID))])
-    # ensure super present
-    sa = int(obj.get("super_admin", SUPER_ADMIN_ID))
-    admins = obj.get("admins", [])
-    if sa not in admins:
-        admins.append(sa)
-    obj["admins"] = sorted({int(x) for x in admins})
-    _save_json(ADMINS_FILE, obj)
-    return obj
-
-def get_admin_ids() -> List[int]:
-    obj = _load_admins_obj()
-    return list(obj.get("admins", []))
-
-def is_admin(uid: int) -> bool:
-    try:
-        uid = int(uid)
-    except Exception:
-        return False
-    return uid in set(get_admin_ids())
-
-def is_super_admin(uid: int) -> bool:
-    obj = _load_admins_obj()
-    try:
-        return int(uid) == int(obj.get("super_admin", SUPER_ADMIN_ID))
-    except Exception:
-        return False
-
-def add_admin(uid: int) -> bool:
-    obj = _load_admins_obj()
-    admins = set(int(x) for x in obj.get("admins", []))
-    admins.add(int(uid))
-    obj["admins"] = sorted(admins)
-    _save_json(ADMINS_FILE, obj)
-    return True
-
-def remove_admin(uid: int) -> bool:
-    obj = _load_admins_obj()
-    sa = int(obj.get("super_admin", SUPER_ADMIN_ID))
-    uid = int(uid)
-    if uid == sa:
-        return False
-    admins = set(int(x) for x in obj.get("admins", []))
-    admins.discard(uid)
-    obj["admins"] = sorted(admins)
-    _save_json(ADMINS_FILE, obj)
-    return True
-
-async def notify_admins(context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None, order_id: str | None = None):
-    """Send to all admins; if order_id provided, store message ids for cleanup."""
-    admin_msgs = []
-    for aid in get_admin_ids():
-        try:
-            msg = await context.bot.send_message(chat_id=aid, text=text, reply_markup=reply_markup)
-            admin_msgs.append({"chat_id": aid, "message_id": msg.message_id})
-        except Exception:
-            pass
-    if order_id and admin_msgs:
-        # append to existing
-        order = get_order(order_id) or {}
-        existing = order.get("admin_msgs") or []
-        if isinstance(existing, list):
-            existing.extend(admin_msgs)
-        else:
-            existing = admin_msgs
-        update_order(order_id, {"admin_msgs": existing})
-
-async def cleanup_order_admin_messages(context: ContextTypes.DEFAULT_TYPE, order: Dict[str, Any]):
-    msgs = order.get("admin_msgs") or []
-    if not isinstance(msgs, list):
-        return
-    for it in msgs:
-        try:
-            chat_id = it.get("chat_id")
-            mid = it.get("message_id")
-            if chat_id and mid:
-                # prefer removing buttons; if not possible, try delete
-                try:
-                    await context.bot.edit_message_reply_markup(chat_id=chat_id, message_id=mid, reply_markup=None)
-                except Exception:
-                    try:
-                        await context.bot.delete_message(chat_id=chat_id, message_id=mid)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
-def get_eish(uid: int) -> Optional[Dict[str, Any]]:
-    data = _load_json(EISH_FILE)
-    return data.get(str(uid))
-
-def set_eish(uid: int, username: str, password: str):
-    data = _load_json(EISH_FILE)
-    data[str(uid)] = {
-        "username": username,
-        "password": password,
-        "created_at": int(time.time())
-    }
-    _save_json(EISH_FILE, data)
-
-
-def delete_eish(uid: int) -> bool:
-    data = _load_json(EISH_FILE)
-    if str(uid) in data:
-        data.pop(str(uid), None)
-        _save_json(EISH_FILE, data)
-        return True
-    return False
-
-# =========================
-# Bans
-# =========================
-def is_banned(uid: int) -> Tuple[bool, str]:
-    bans = _load_json(BANS_FILE)
-    info = bans.get(str(uid), {})
-    if info.get("banned"):
-        return True, info.get("reason", "محظور")
-    return False, ""
-
-def ban_user(uid: int, reason: str):
-    bans = _load_json(BANS_FILE)
-    bans[str(uid)] = {"banned": True, "reason": reason, "ts": int(time.time())}
-    _save_json(BANS_FILE, bans)
-
-def unban_user(uid: int):
-    bans = _load_json(BANS_FILE)
-    if str(uid) in bans:
-        bans[str(uid)] = {"banned": False, "reason": "", "ts": int(time.time())}
-        _save_json(BANS_FILE, bans)
-
-# =========================
-# History + Admin log
-# =========================
-def add_history(uid: int, event: Dict[str, Any]):
-    hist = _load_json(HISTORY_FILE)
-    key = str(uid)
-    hist.setdefault(key, [])
-    hist[key].append(event)
-    hist[key] = hist[key][-200:]
-    _save_json(HISTORY_FILE, hist)
-
-def get_history(uid: int) -> List[Dict[str, Any]]:
-    hist = _load_json(HISTORY_FILE)
-    return hist.get(str(uid), [])
-
-def admin_log(event: Dict[str, Any]):
-    log = _load_json(ADMINLOG_FILE)
-    if not isinstance(log, list):
-        log = []
-    log.append(event)
-    log = log[-500:]
-    _save_json(ADMINLOG_FILE, log)
-
-# =========================
-# Orders
+# طلبات
 # =========================
 def make_order_id(prefix: str) -> str:
-    return f"{prefix}-{time.time_ns()}"
+    return f"{prefix}-{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
 
 def add_order(order: Dict[str, Any]):
     orders = _load_json(ORDERS_FILE)
@@ -702,60 +313,339 @@ def has_pending_lock(uid: int) -> bool:
     s = get_settings()
     return len(pending_for_user(uid)) >= int(s["max_pending"])
 
-def rollback_order_if_exceeds_pending(uid: int, order_id: str) -> bool:
-    s = get_settings()
-    if len(pending_for_user(uid)) > int(s["max_pending"]):
-        orders = _load_json(ORDERS_FILE)
-        orders.pop(order_id, None)
-        _save_json(ORDERS_FILE, orders)
+# =========================
+# إدارة العمليات المحققة (منع التكرار)
+# =========================
+class VerifiedTransactionsManager:
+    def __init__(self):
+        self.verified_tx = self.load_verified_transactions()
+    
+    def load_verified_transactions(self):
+        data = _load_json(VERIFIED_TX_FILE)
+        if not isinstance(data, dict):
+            return {}
+        return data
+    
+    def save_verified_transactions(self):
+        _save_json(VERIFIED_TX_FILE, self.verified_tx)
+    
+    def is_transaction_verified(self, transaction_id, amount=None, cash_code=None):
+        tx_data = self.verified_tx.get(transaction_id)
+        if not tx_data:
+            return False
+        if amount and tx_data.get("amount") != amount:
+            return False
+        if cash_code and tx_data.get("cash_code") != cash_code:
+            return False
         return True
-    return False
+    
+    def add_verified_transaction(self, transaction_id, amount, cash_code, user_id, order_id):
+        self.verified_tx[transaction_id] = {
+            "transaction_id": transaction_id,
+            "amount": amount,
+            "cash_code": cash_code,
+            "user_id": user_id,
+            "order_id": order_id,
+            "verified_at": int(time.time()),
+            "verified_by": "auto_system",
+            "status": "verified"
+        }
+        self.save_verified_transactions()
+    
+    def get_transaction_info(self, transaction_id):
+        return self.verified_tx.get(transaction_id)
+
+tx_manager = VerifiedTransactionsManager()
+
+async def check_transaction_duplicate(transaction_id, amount, cash_code, user_id):
+    if tx_manager.is_transaction_verified(transaction_id, amount, cash_code):
+        return {
+            "allowed": False,
+            "reason": "تم التحقق من هذا الرقم مسبقاً",
+            "existing_data": tx_manager.get_transaction_info(transaction_id)
+        }
+    return {"allowed": True}
 
 # =========================
-# Users registry (for broadcast)
+# نظام الدخول المتخفي إلى سيرياتيل
 # =========================
-def get_all_user_ids() -> List[int]:
-    """Collect all known user IDs from stored JSON files (best-effort)."""
-    uids: set[int] = set()
-
-    def add_keys(d):
-        if isinstance(d, dict):
-            for k in d.keys():
-                if str(k).isdigit():
-                    uids.add(int(k))
-
-    # balances keys
-    add_keys(_load_json(BALANCES_FILE))
-
-    # users keys
-    add_keys(_load_json(USERS_FILE))
-
-    # history keys
-    add_keys(_load_json(HISTORY_FILE))
-
-    # eishancy accounts keys
-    add_keys(_load_json(EISH_FILE))
-
-    # bans keys
-    add_keys(_load_json(BANS_FILE))
-
-    # orders user_id values
-    orders = _load_json(ORDERS_FILE)
-    if isinstance(orders, dict):
-        for o in orders.values():
+class StealthSyriatelLogin:
+    def __init__(self):
+        self.driver = None
+        self.logged_in = False
+    
+    async def init_stealth_driver(self):
+        if not SELENIUM_AVAILABLE:
+            return False
+        try:
+            options = uc.ChromeOptions()
+            options.add_argument('--headless')
+            options.add_argument('--no-sandbox')
+            options.add_argument('--disable-dev-shm-usage')
+            options.add_argument('--disable-gpu')
+            options.add_argument('--window-size=1920,1080')
+            options.add_argument('--disable-blink-features=AutomationControlled')
+            
+            if os.path.exists('/usr/bin/google-chrome-stable'):
+                options.binary_location = '/usr/bin/google-chrome-stable'
+            
+            user_agents = [
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            ]
+            selected_agent = random.choice(user_agents)
+            options.add_argument(f'--user-agent={selected_agent}')
+            
+            self.driver = uc.Chrome(options=options)
+            return True
+        except Exception as e:
+            print(f"❌ فشل تهيئة المتصفح: {e}")
+            return False
+    
+    async def human_like_login(self, username, password):
+        if not self.driver:
+            if not await self.init_stealth_driver():
+                return False
+        try:
+            print("🔑 جاري تسجيل الدخول إلى سيرياتيل...")
+            self.driver.get("https://cash.syriatel.sy/")
+            await asyncio.sleep(5)
+            
             try:
-                uids.add(int(o.get("user_id")))
-            except Exception:
+                username_field = self.driver.find_element(By.NAME, "username")
+                password_field = self.driver.find_element(By.NAME, "password")
+                username_field.send_keys(username)
+                await asyncio.sleep(1)
+                password_field.send_keys(password)
+                await asyncio.sleep(1)
+                
+                login_button = self.driver.find_element(By.XPATH, "//button[@type='submit']")
+                login_button.click()
+                await asyncio.sleep(8)
+                
+                current_url = self.driver.current_url
+                page_source = self.driver.page_source.lower()
+                
+                if "dashboard" in current_url or "home" in current_url or "مرحباً" in page_source:
+                    self.logged_in = True
+                    print("✅ تم تسجيل الدخول بنجاح")
+                    return True
+                return False
+            except Exception as e:
+                print(f"❌ خطأ في عملية الدخول: {e}")
+                return False
+        except Exception as e:
+            print(f"❌ خطأ عام في الدخول: {e}")
+            return False
+    
+    async def stealth_check_transaction(self, transaction_id, amount, cash_code):
+        if not self.logged_in or not self.driver:
+            return False
+        try:
+            self.driver.get("https://cash.syriatel.sy/transactions")
+            await asyncio.sleep(5)
+            
+            page_source = self.driver.page_source
+            patterns = [
+                rf'{transaction_id}',
+                rf'رقم العملية[\s:]*{transaction_id}',
+                rf'{amount}',
+                rf'مبلغ[\s:]*{amount}',
+            ]
+            
+            for pattern in patterns:
+                if re.search(pattern, page_source, re.IGNORECASE):
+                    print(f"✅ تم العثور على التحويل: {transaction_id}")
+                    return True
+            
+            return False
+        except Exception as e:
+            print(f"❌ خطأ في البحث عن التحويل: {e}")
+            return False
+    
+    async def logout(self):
+        if self.driver and self.logged_in:
+            try:
+                self.driver.get("https://cash.syriatel.sy/logout")
+                await asyncio.sleep(3)
+            except:
                 pass
+            self.logged_in = False
+    
+    async def close(self):
+        if self.driver:
+            try:
+                self.driver.quit()
+            except:
+                pass
+            self.driver = None
+            self.logged_in = False
 
-    # remove admin
-    uids.discard(int(ADMIN_ID))
-    return sorted(uids)
-
+stealth_login = StealthSyriatelLogin()
 
 # =========================
-# Validators
+# معالجة التحقق الناجح
 # =========================
+async def process_verified_transaction(order, verification_method="auto"):
+    order_id = order.get("order_id")
+    tx_id = order.get("tx_id", "").strip()
+    amount = order.get("amount", 0)
+    cash_code = order.get("syriatel_code", "23547")
+    user_id = order.get("user_id")
+    
+    if not tx_id:
+        return False
+    
+    # إضافة العملية إلى السجل المحققة
+    tx_manager.add_verified_transaction(
+        transaction_id=tx_id,
+        amount=amount,
+        cash_code=cash_code,
+        user_id=user_id,
+        order_id=order_id
+    )
+    
+    # تحديث حالة الطلب
+    update_order(order_id, {
+        "status": "completed",
+        "verified_at": int(time.time()),
+        "verified_by": verification_method,
+        "duplicate_check": "passed"
+    })
+    
+    # تحديث رصيد المستخدم
+    try:
+        balance, hold = get_wallet(user_id)
+        set_wallet(user_id, balance + amount, hold)
+    except Exception as e:
+        print(f"❌ فشل تحديث الرصيد: {e}")
+        return False
+    
+    return True
+
+# =========================
+# مهمة التحقق الآلي المتخفي
+# =========================
+async def stealth_auto_verification_job(context: ContextTypes.DEFAULT_TYPE):
+    username = os.getenv("SYRIATEL_USERNAME", "").strip()
+    password = os.getenv("SYRIATEL_PASSWORD", "").strip()
+    cash_code = os.getenv("SYRIATEL_CASH_CODE", "23547").strip()
+    
+    if not username or not password:
+        return
+    
+    if os.getenv("AUTO_LOGIN_ENABLED", "false").lower() != "true":
+        return
+    
+    print("🔍 بدء جولة التحقق الآلي...")
+    
+    # جلب الطلبات المعلقة
+    orders = _load_json(ORDERS_FILE)
+    pending_orders = {k: v for k, v in orders.items() 
+                     if v.get("status") == "pending" 
+                     and v.get("type") == "bot_topup"
+                     and v.get("created_at", 0) > time.time() - 86400}
+    
+    if not pending_orders:
+        return
+    
+    max_checks = int(os.getenv("MAX_CHECKS_PER_SESSION", "5"))
+    orders_to_check = list(pending_orders.items())[:max_checks]
+    
+    # محاولة الدخول
+    if not stealth_login.logged_in:
+        print("🔑 محاولة الدخول إلى سيرياتيل...")
+        login_success = await stealth_login.human_like_login(username, password)
+        if not login_success:
+            return
+    
+    # التحقق من كل طلب
+    verified_count = 0
+    for order_id, order in orders_to_check:
+        try:
+            transaction_id = order.get("tx_id", "").strip()
+            amount = order.get("amount", 0)
+            
+            if not transaction_id or amount <= 0:
+                continue
+            
+            # فحص التكرار أولاً
+            if tx_manager.is_transaction_verified(transaction_id, amount, cash_code):
+                print(f"🚨 تخطي: {transaction_id} محققة مسبقاً")
+                update_order(order_id, {
+                    "status": "rejected",
+                    "rejected_at": int(time.time()),
+                    "reject_reason": "تكرار رقم العملية"
+                })
+                continue
+            
+            # البحث في سيرياتيل
+            print(f"🔎 فحص: {transaction_id}")
+            found = await stealth_login.stealth_check_transaction(transaction_id, amount, cash_code)
+            
+            if found:
+                success = await process_verified_transaction(order, "stealth_auto")
+                if success:
+                    # إشعار المستخدم
+                    try:
+                        await context.bot.send_message(
+                            chat_id=order.get("user_id"),
+                            text=f"✅ تم التحقق من تحويلك!\nتم إضافة {amount} لرصيدك."
+                        )
+                    except:
+                        pass
+                    
+                    verified_count += 1
+                    print(f"✅ تم التحقق: {order_id}")
+            
+            await asyncio.sleep(random.uniform(2, 4))
+            
+        except Exception as e:
+            print(f"❌ خطأ: {e}")
+    
+    if verified_count > 0:
+        print(f"🎯 تم التحقق من {verified_count} طلب")
+    
+    await stealth_login.logout()
+
+# =========================
+# دوال iChancy Pool
+# =========================
+def _load_pool() -> List[Dict[str, Any]]:
+    data = _load_json(EISH_POOL_FILE)
+    if isinstance(data, list):
+        return data
+    return []
+
+def _save_pool(pool: List[Dict[str, Any]]) -> None:
+    _save_json(EISH_POOL_FILE, pool)
+
+def pool_stats() -> Dict[str, int]:
+    pool = _load_pool()
+    available = sum(1 for a in pool if a.get("status") == "available")
+    assigned = sum(1 for a in pool if a.get("status") == "assigned")
+    return {"total": len(pool), "available": available, "assigned": assigned}
+
+# =========================
+# دوال إضافية
+# =========================
+def is_banned(uid: int) -> Tuple[bool, str]:
+    bans = _load_json(BANS_FILE)
+    info = bans.get(str(uid), {})
+    if info.get("banned"):
+        return True, info.get("reason", "")
+    return False, ""
+
+def add_history(uid: int, event: Dict[str, Any]):
+    hist = _load_json(HISTORY_FILE)
+    key = str(uid)
+    hist.setdefault(key, [])
+    hist[key].append(event)
+    hist[key] = hist[key][-200:]
+    _save_json(HISTORY_FILE, hist)
+
+def safe_text(s: str) -> str:
+    return (s or "").strip()
+
 def is_pos_int(s: str) -> bool:
     return s.isdigit() and int(s) > 0
 
@@ -765,104 +655,47 @@ def is_reasonable_txid(s: str) -> bool:
 def is_reasonable_phone(s: str) -> bool:
     return s.isdigit() and 7 <= len(s) <= 14
 
-def safe_text(s: str) -> str:
-    return (s or "").strip()
+# =========================
+# حالات المحادثة
+# =========================
+(
+    ST_MAIN,
+    ST_EISH_ACTION,
+    ST_E_USER,
+    ST_E_PASS,
+    ST_BAL_MENU,
+    ST_TOPUP_METHOD,
+    ST_TOPUP_TXID,
+    ST_WITHDRAW_METHOD,
+    ST_WITHDRAW_NUMBER,
+    ST_AMOUNT,
+    ST_TOPUP_CODE,
+    ST_CONFIRM,
+    ST_DUPLICATE_CHECK,
+) = range(13)
 
 # =========================
-# اشتراك إجباري: UI + تحقق
+# أزرار
 # =========================
-def ik_join_required():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ اشترك بالقناة", url=REQUIRED_CHANNEL_URL)],
-        [InlineKeyboardButton("🔄 تحقق من الاشتراك", callback_data=CB_CHECK_JOIN)],
-    ])
-
-async def is_user_joined(context: ContextTypes.DEFAULT_TYPE, uid: int) -> bool:
-    try:
-        m = await context.bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=uid)
-        return m.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER)
-    except Exception:
-        return False
-
-async def ensure_joined(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    uid = update.effective_user.id
-    ok = await is_user_joined(context, uid)
-    if not ok:
-        await update.effective_message.reply_text(
-            "⚠️ لاستخدام البوت يجب الاشتراك بالقناة أولاً:\n"
-            f"{REQUIRED_CHANNEL}\n\n"
-            "بعد الاشتراك اضغط زر (🔄 تحقق من الاشتراك).",
-            reply_markup=ik_join_required()
-        )
-        return False
-    return True
-
-async def guard_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    uid = update.effective_user.id
-    banned, reason = is_banned(uid)
-    if banned:
-        await update.effective_message.reply_text(f"⛔ حسابك محظور.\nالسبب: {reason}")
-        return False
-
-    # صيانة (يُسمح للأدمن فقط)
-    mnt = get_maintenance()
-    if mnt.get("active") and not is_admin(uid):
-        await update.effective_message.reply_text(
-            "🛠️ البوت تحت الصيانة مؤقتًا.\n"
-            "جرّب لاحقًا، وشكرًا لتفهمك 🤍"
-        )
-        return False
-    if not await ensure_joined(update, context):
-        return False
-    ensure_user_registered(uid)
-    upsert_user_profile(update.effective_user)
-    set_user_active(uid)
-    return True
-
-async def cb_check_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    if not q:
-        return
-    await q.answer()
-
-    uid = q.from_user.id
-    ok = await is_user_joined(context, uid)
-    if not ok:
-        await q.message.reply_text(
-            "❌ لم يتم العثور على اشتراكك بالقناة بعد.\n"
-            "اشترك أولاً ثم اضغط (🔄 تحقق من الاشتراك) مرة ثانية.",
-            reply_markup=ik_join_required()
-        )
-        return
-
-    await q.message.reply_text(
-        "✅ تم التحقق! أهلاً بك 👋\nاختر أحد الخيارات من الأسفل:",
-        reply_markup=kb_main()
-    )
-
-# (اختياري) حدث ترك القناة — يحتاج البوت أدمن بالقناة
-async def on_channel_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        chat = update.chat_member.chat
-        new_status = update.chat_member.new_chat_member.status
-        old_status = update.chat_member.old_chat_member.status
-        user = update.chat_member.from_user
-    except Exception:
-        return
-
-    if (chat.username or "").lower() != REQUIRED_CHANNEL.lstrip("@").lower():
-        return
-
-    left_now = new_status in ("left", "kicked") and old_status not in ("left", "kicked")
-    if left_now:
-        admin_log({"ts": int(time.time()), "admin_id": ADMIN_ID, "action": "left_required_channel", "uid": user.id})
-        try:
-            await notify_admins(context, text=f"ℹ️ المستخدم {user.id} ترك القناة الإلزامية. سيتم منعه تلقائيًا عند استخدام البوت.")
-        except Exception:
-            pass
+BTN_EISHANCY = "حساب ايشانسي"
+BTN_BALANCE = "رصيدي"
+BTN_REFERRALS = "🎁 الإحالات"
+BTN_BACK = "⬅️ رجوع"
+BTN_MY_EISH = "👤 حسابي"
+BTN_CREATE = "🆕 إنشاء حساب"
+BTN_E_TOPUP = "💳 شحن إيـشانسي"
+BTN_E_WITH = "💸 سحب من إيـشانسي"
+BTN_E_DEL = "🗑️ حذف الحساب"
+BTN_EISH_SITE = "🌐 موقع iChancy"
+BTN_BOT_TOPUP = "شحن رصيد في البوت"
+BTN_BOT_WITHDRAW = "سحب رصيد من البوت"
+BTN_SYRIATEL = "سيرياتيل كاش"
+BTN_SHAM = "شام كاش"
+BTN_CONFIRM = "✅ تأكيد"
+BTN_CANCEL = "❌ إلغاء"
 
 # =========================
-# UI Keyboards (User)
+# لوحات المفاتيح
 # =========================
 def kb_main():
     return ReplyKeyboardMarkup(
@@ -875,7 +708,6 @@ def kb_back():
     return ReplyKeyboardMarkup([[KeyboardButton(BTN_BACK)]], resize_keyboard=True)
 
 def kb_eish_actions():
-    # Grid layout (2 buttons per row) مع الحفاظ على نفس الأزرار ونفس الترتيب
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton(BTN_MY_EISH), KeyboardButton(BTN_CREATE)],
@@ -894,21 +726,6 @@ def kb_balance_menu():
         ],
         resize_keyboard=True
     )
-
-
-def kb_topup_codes():
-    s = get_settings()
-    codes = s.get("syriatel_codes") or [s.get("syriatel_code")]
-    rows = []
-    row = []
-    for c in codes:
-        row.append(KeyboardButton(str(c)))
-        if len(row) == 2:
-            rows.append(row); row=[]
-    if row:
-        rows.append(row)
-    rows.append([KeyboardButton(BTN_BACK)])
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 def kb_methods():
     return ReplyKeyboardMarkup(
@@ -929,1957 +746,408 @@ def kb_confirm():
     )
 
 # =========================
-# UI (Admin Inline)
+# دوال التحقق من الاشتراك
 # =========================
-def ik_admin_home():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📥 الطلبات المعلقة", callback_data="AD:PENDING:0"),
-         InlineKeyboardButton("📜 آخر الطلبات", callback_data="AD:LAST:0")],
-        [InlineKeyboardButton("🔎 بحث OrderID", callback_data="AD:SEARCH"),
-         InlineKeyboardButton("👤 إدارة مستخدم", callback_data="AD:USER")],
-        [InlineKeyboardButton("📊 إحصائيات", callback_data="AD:STATS"),
-         InlineKeyboardButton("⚙️ إعدادات", callback_data="AD:SETTINGS")],
-        [InlineKeyboardButton("👥 سجل المشتركين", callback_data="AD:USERS:0"),
-         InlineKeyboardButton("📣 رسالة جماعية", callback_data="AD:BCAST")],
-        [InlineKeyboardButton("🗂 مخزون إيـشانسي", callback_data="AD:EPOOL")],
-        [InlineKeyboardButton("🗄️ Backup", callback_data="AD:BACKUP"), InlineKeyboardButton("♻️ Restore", callback_data="AD:RESTORE"), InlineKeyboardButton("🛠️ صيانة", callback_data="AD:MAINT")],
-        [InlineKeyboardButton("🧾 تصدير مختصر", callback_data="AD:EXPORT")]
-    ])
+async def is_user_joined(context: ContextTypes.DEFAULT_TYPE, uid: int) -> bool:
+    try:
+        m = await context.bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=uid)
+        return m.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER)
+    except Exception:
+        return False
 
-
-def ik_copy_creds():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 نسخ اسم المستخدم", callback_data="CP:U"),
-         InlineKeyboardButton("📋 نسخ كلمة المرور", callback_data="CP:P")],
-        [InlineKeyboardButton("⬅️ رجوع", callback_data="EISH:MENU")]
-    ])
-
-def ik_suggest_accept():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ موافق", callback_data="EISH:ACCEPT"),
-         InlineKeyboardButton("✏️ اكتب اسم آخر", callback_data="EISH:RETRY")],
-        [InlineKeyboardButton("⬅️ رجوع", callback_data="EISH:MENU")]
-    ])
-
-def ik_epool_home():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ إضافة حسابات بالجملة", callback_data="AD:EPOOL:ADD"),
-         InlineKeyboardButton("📋 المتاح", callback_data="AD:EPOOL:AVAIL")],
-        [InlineKeyboardButton("📦 الموزع", callback_data="AD:EPOOL:ASSIGNED"),
-         InlineKeyboardButton("📊 إحصائيات المخزون", callback_data="AD:EPOOL:STATS")],
-        [InlineKeyboardButton("⬅️ رجوع", callback_data="AD:HOME")]
-    ])
-def ik_admin_back():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ رجوع", callback_data="AD:HOME")]])
-
-def ik_order_actions(order_id: str, allow_edit: bool = False, extra_rows: list | None = None):
-    rows = [
-        [InlineKeyboardButton("✅ قبول", callback_data=f"OD:APPROVE:{order_id}"),
-         InlineKeyboardButton("❌ رفض", callback_data=f"OD:REJECT:{order_id}")],
-    ]
-    if allow_edit:
-        rows.append([InlineKeyboardButton("✏️ تعديل البيانات", callback_data=f"OD:EDIT:{order_id}")])
-    rows += [
-        [InlineKeyboardButton("👤 المستخدم", callback_data=f"OD:USER:{order_id}"),
-         InlineKeyboardButton("🧾 السجل", callback_data=f"OD:HIST:{order_id}")],
-    ]
-    if extra_rows:
-        rows.extend(extra_rows)
-    rows.append([InlineKeyboardButton("⬅️ رجوع", callback_data="AD:PENDING:0")])
-    return InlineKeyboardMarkup(rows)
-
-def ik_pagination(base: str, page: int, has_prev: bool, has_next: bool):
-    btns = []
-    if has_prev:
-        btns.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"{base}:{page-1}"))
-    btns.append(InlineKeyboardButton(f"📄 {page+1}", callback_data="AD:HOME"))
-    if has_next:
-        btns.append(InlineKeyboardButton("التالي ➡️", callback_data=f"{base}:{page+1}"))
-    return InlineKeyboardMarkup([btns, [InlineKeyboardButton("⬅️ رجوع", callback_data="AD:HOME")]])
+async def ensure_joined(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    uid = update.effective_user.id
+    ok = await is_user_joined(context, uid)
+    if not ok:
+        await update.effective_message.reply_text(
+            f"⚠️ اشترك بالقناة أولاً: {REQUIRED_CHANNEL}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ اشترك", url=REQUIRED_CHANNEL_URL)],
+                [InlineKeyboardButton("🔄 تحقق", callback_data="JOIN:CHECK")]
+            ])
+        )
+        return False
+    return True
 
 # =========================
-# رسائل UX
-# =========================
-def msg_pending_notice() -> str:
-    return "⏳ تم استلام طلبك وجارٍ مراجعته من قبل الإدارة.\nسيتم إشعارك فور اتخاذ القرار."
-
-def msg_support() -> str:
-    return "📞 شام كاش: تواصل مع الدعم."
-
-# =========================
-# User handlers
+# معالجات المستخدم الرئيسية
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            if not await guard_user(update, context):
-                return ConversationHandler.END
-
-            # referral payload: /start ref_<uid>
-            try:
-                args = getattr(context, "args", []) or []
-                if args:
-                    payload = args[0]
-                    if isinstance(payload, str) and payload.startswith("ref_"):
-                        ref_uid = int(payload.split("_", 1)[1])
-                        granted = add_referral(ref_uid, update.effective_user.id)
-                        if granted:
-                            try:
-                                await context.bot.send_message(chat_id=ref_uid, text="🎉 لديك إحالة جديدة! تم إضافة 10 نقاط إلى رصيد نقاطك.")
-                            except Exception:
-                                pass
-            except Exception:
-                pass
-
-            context.user_data.clear()
-            await update.message.reply_text(
-        "أهلًا وسهلاً بكم في بوت الخدمات 👋\nاختر أحد الخيارات من الأسفل:",
-                reply_markup=kb_main()
-            )
-            return ST_MAIN
+    await update.message.reply_text(
+        "أهلًا وسهلاً! اختر من القائمة:",
+        reply_markup=kb_main()
+    )
+    return ST_MAIN
 
 async def go_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard_user(update, context):
-        return ConversationHandler.END
-
     context.user_data.clear()
-    if update.message:
-        await update.message.reply_text("✅ رجعناك للقائمة الرئيسية", reply_markup=kb_main())
+    await update.message.reply_text("✅ القائمة الرئيسية", reply_markup=kb_main())
     return ST_MAIN
-
-async def show_balance_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard_user(update, context):
-        return ConversationHandler.END
-
-    uid = update.effective_user.id
-    b, h = get_wallet(uid)
-    await update.message.reply_text(
-        f"💰 رصيدك الحالي: {b}\n"
-        f"⏳ رصيد محجوز: {h}\n\n"
-        "اختر العملية التي تريدها:",
-        reply_markup=kb_balance_menu()
-    )
-    return ST_BAL_MENU
 
 async def smart_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard_user(update, context):
-        return ConversationHandler.END
-
     text = safe_text(update.message.text)
-
+    uid = update.effective_user.id
+    
     if text == BTN_BACK:
         return await go_home(update, context)
-
-    if text == BTN_MY_EISH:
-        e = get_eish(uid)
-        if not e:
-            await update.message.reply_text("ℹ️ لا يوجد لديك حساب إيـشانسي محفوظ.", reply_markup=kb_eish_actions())
-            return ST_EISH_ACTION
-
-        await update.message.reply_text(
-            "📄 معلومات حسابك على iChancy\n\n"
-            f"👤 اسم المستخدم:\n`{e.get('username','')}`\n\n"
-            f"🔑 كلمة المرور:\n`{e.get('password','')}`\n\n"
-            "اضغط مطوّل للنسخ ⬆️",
-            parse_mode="Markdown",
-            reply_markup=kb_eish_actions()
-        )
-        return ST_EISH_ACTION
-
-
-    # 👤 عرض بيانات حساب إيـشانسي (بدون منع حتى لو لديه طلب معلّق)
-    if text == BTN_MY_EISH:
-        e = get_eish(uid)
-        if not e:
-            await update.message.reply_text("ℹ️ لا يوجد لديك حساب إيـشانسي محفوظ.", reply_markup=kb_eish_actions())
-            return ST_EISH_ACTION
-
-        await update.message.reply_text(
-            "📄 معلومات حسابك على iChancy ✅\n\n"
-            f"👤 اسم المستخدم:\n`{e.get('username', '-')}`\n\n"
-            f"🔑 كلمة المرور:\n`{e.get('password', '-')}`\n\n"
-            "📝 اضغط مطوّلًا على الرسالة للنسخ، أو استخدم الأزرار بالأسفل:",
-            parse_mode="Markdown",
-            reply_markup=ik_copy_creds()
-        )
-        return ST_EISH_ACTION
-
-    if text in (BTN_EISHANCY, BTN_BALANCE):
-        return await main_menu(update, context)
-
-    if text in (BTN_CREATE, BTN_E_TOPUP, BTN_E_WITH, BTN_E_DEL):
-        return await eish_choose_action(update, context)
-
-    if text in (BTN_BOT_TOPUP, BTN_BOT_WITHDRAW):
-        return await balance_menu(update, context)
-
-    if text in (BTN_SYRIATEL, BTN_SHAM):
-        flow = context.user_data.get("flow")
-        if flow == "bot_topup":
-            return await topup_choose_method(update, context)
-        if flow == "bot_withdraw":
-            return await withdraw_choose_method(update, context)
-        return await show_balance_menu(update, context)
-
-    return await main_menu(update, context)
-
-async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard_user(update, context):
-        return ConversationHandler.END
-
-    uid = update.effective_user.id
-    text = safe_text(update.message.text)
-
+    
     if text == BTN_EISHANCY:
-        e = get_eish(uid)
-        extra = f"\n\n👤 حسابك الحالي: {e.get('username')}\n✅ الحالة: محفوظ" if e else ""
-        await update.message.reply_text("اختر الإجراء الذي تريد تنفيذه:" + extra, reply_markup=kb_eish_actions())
+        e = _load_json(EISH_FILE).get(str(uid))
+        extra = f"\nحسابك: {e.get('username')}" if e else ""
+        await update.message.reply_text("اختر إجراء iChancy:" + extra, reply_markup=kb_eish_actions())
         return ST_EISH_ACTION
-
+    
     if text == BTN_BALANCE:
-        return await show_balance_menu(update, context)
-
-    if text == BTN_REFERRALS:
-        uid = update.effective_user.id
-        bot_user = (await context.bot.get_me()).username
-        pts = get_points(uid)
-        link = referral_link(bot_user, uid)
-        msg = (
-            f"🎁 نظام الإحالات\n\n"
-            f"⭐ نقاطك الحالية: {pts}\n"
-            f"🎯 كل إحالة = 10 نقاط\n"
-            f"💳 عند 100 نقطة يمكنك الاستبدال بـ 10000\n\n"
-            f"🔗 رابط الإحالة الخاص بك:\n{link}"
-        )
-        # show redeem button if eligible
-        if pts >= 100:
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ استبدال 100 نقطة = 10000", callback_data="RF:REDEEM")]])
-            await update.message.reply_text(msg, reply_markup=kb)
-        else:
-            await update.message.reply_text(msg, reply_markup=kb_main())
-        return ST_MAIN
-
-    await update.message.reply_text("❌ الرجاء اختيار خيار صحيح", reply_markup=kb_main())
+        b, h = get_wallet(uid)
+        await update.message.reply_text(f"💰 رصيدك: {b}\n⏳ محجوز: {h}", reply_markup=kb_balance_menu())
+        return ST_BAL_MENU
+    
+    await update.message.reply_text("❌ خيار غير صحيح", reply_markup=kb_main())
     return ST_MAIN
 
-# ------- Eishancy -------
-async def eish_choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard_user(update, context):
-        return ConversationHandler.END
-
-    uid = update.effective_user.id
-    text = safe_text(update.message.text)
-
-    if text == BTN_BACK:
-        return await go_home(update, context)
-
-    if has_pending_lock(uid):
-        await update.message.reply_text(
-            "⚠️ لديك طلب معلّق بالفعل.\nيرجى انتظار قبول/رفض الإدارة قبل إنشاء طلب جديد.",
-            reply_markup=kb_eish_actions()
-        )
-        return ST_EISH_ACTION
-
-    context.user_data.clear()
-    context.user_data["flow"] = "eishancy"
-    context.user_data["action"] = text
-
-    if text == BTN_CREATE:
-        if get_eish(uid):
-            await update.message.reply_text("⚠️ لديك حساب إيـشانسي محفوظ بالفعل ولا يمكنك إنشاء أكثر من حساب.", reply_markup=kb_eish_actions())
-            return ST_EISH_ACTION
-        await update.message.reply_text("✅ اكتب اسم المستخدم المطلوب (مثال: bro_ahmad22):", reply_markup=kb_back())
-        return ST_E_USER
-
-    if text == BTN_E_TOPUP:
-        if not get_eish(uid):
-            await update.message.reply_text("⚠️ لازم تعمل (إنشاء حساب) إيـشانسي أولاً قبل الشحن.", reply_markup=kb_eish_actions())
-            return ST_EISH_ACTION
-        context.user_data["amount_min"] = 1
-        await update.message.reply_text("اكتب مبلغ الشحن (بالأرقام فقط):", reply_markup=kb_back())
-        return ST_AMOUNT
-
-    if text == BTN_E_WITH:
-        if not get_eish(uid):
-            await update.message.reply_text("⚠️ لازم تعمل (إنشاء حساب) إيـشانسي أولاً قبل السحب.", reply_markup=kb_eish_actions())
-            return ST_EISH_ACTION
-        context.user_data["amount_min"] = 1
-        await update.message.reply_text("اكتب المبلغ المطلوب سحبه من إيـشانسي (بالأرقام فقط):", reply_markup=kb_back())
-        return ST_AMOUNT
-
-    # عرض معلومات حساب المستخدم (مع أزرار نسخ)
-    if text == BTN_MY_EISH:
-        e = get_eish(uid)
-        if not e:
-            await update.message.reply_text("ℹ️ لا يوجد لديك حساب إيـشانسي محفوظ.", reply_markup=kb_eish_actions())
-            return ST_EISH_ACTION
-        context.user_data["last_username"] = e.get("username","")
-        context.user_data["last_password"] = e.get("password","")
-        await update.message.reply_text(
-            "📄 معلومات حسابك على iChancy\n\n"
-            f"اسم المستخدم: {e.get('username','-')}\n"
-            f"كلمة المرور: {e.get('password','-')}\n\n"
-            "اضغط الأزرار بالأسفل للنسخ:",
-            reply_markup=ik_copy_creds()
-        )
-        return ST_EISH_ACTION
-
-    if text == BTN_EISH_SITE:
-        await update.message.reply_text("🔗 رابط الموقع الرسمي:\nhttps://www.ichancy.com", reply_markup=kb_eish_actions())
-        return ST_EISH_ACTION
-
-    # حذف حساب إيـشانسي (يسمح للمستخدم بحذف حسابه المحفوظ)
-    if text == BTN_E_DEL:
-        if not get_eish(uid):
-            await update.message.reply_text("ℹ️ لا يوجد لديك حساب إيـشانسي محفوظ لحذفه.", reply_markup=kb_eish_actions())
-            return ST_EISH_ACTION
-
-        context.user_data["flow"] = "eishancy"
-        context.user_data["action"] = BTN_E_DEL
-        e = get_eish(uid)
-        context.user_data["confirm_text"] = (
-            "⚠️ هل أنت متأكد أنك تريد حذف حساب إيـشانسي المحفوظ؟\n\n"
-            f"👤 حسابك الحالي: {e.get('username','-')}\n\n"
-            "ملاحظة: يمكنك إنشاء حساب جديد لاحقًا من داخل البوت."
-        )
-        await update.message.reply_text(context.user_data["confirm_text"], reply_markup=kb_confirm())
-        return ST_CONFIRM
-
-    
-    await update.message.reply_text("❌ الرجاء اختيار خيار صحيح", reply_markup=kb_eish_actions())
-    return ST_EISH_ACTION
-
-async def eish_get_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard_user(update, context):
-        return ConversationHandler.END
-
-    uid = update.effective_user.id
-    raw = safe_text(update.message.text)
-
-    if raw == BTN_BACK:
-        return await go_home(update, context)
-
-    if not raw or len(raw) < 2:
-        await update.message.reply_text("❌ اكتب اسم مستخدم صحيح.", reply_markup=kb_back())
-        return ST_E_USER
-
-    if get_eish(uid):
-        await update.message.reply_text(
-            "⚠️ لديك حساب إيـشانسي محفوظ بالفعل ولا يمكنك إنشاء أكثر من حساب.",
-            reply_markup=kb_eish_actions()
-        )
-        return ST_EISH_ACTION
-
-    desired = raw.strip()
-
-    # 1) If user entered an exact available username in the pool, assign مباشرة
-    assigned = await assign_pool_account(uid, desired)
-    if assigned:
-        set_eish(uid, assigned["username"], assigned["password"])
-        context.user_data["last_username"] = assigned["username"]
-        context.user_data["last_password"] = assigned["password"]
-        await update.message.reply_text(
-            "✅ تم تجهيز حسابك بنجاح:\n\n"
-            f"اسم المستخدم: `{assigned['username']}`\n"
-            f"كلمة المرور: `{assigned['password']}`\n\n"
-            "اضغط مطوّل للنسخ ⬆️",
-            parse_mode="Markdown",
-            reply_markup=kb_eish_actions()
-        )
-        return ST_EISH_ACTION
-
-    # 2) Otherwise suggest the closest available username (ذكي حتى لو كتب Ahmad فقط)
-    sug = suggest_pool_account(desired)
-    if not sug:
-        pool = _load_pool()
-        examples = [a.get("username") for a in pool if a.get("status") == "available" and isinstance(a.get("username"), str)]
-        examples = [e for e in examples if e][:5]
-        ex_txt = "\n".join(examples) if examples else "bro_ahmad22\nbro_omar10"
-        await update.message.reply_text(
-            "❌ الاسم الذي أدخلته غير متوفر حاليًا.\n\n"
-            "جرّب أحد الأسماء المتاحة مثل:\n"
-            f"{ex_txt}\n\n"
-            "اكتب اسم آخر:",
-            reply_markup=kb_back()
-        )
-        return ST_E_USER
-
-    context.user_data["suggest_username"] = sug["username"]
-    await update.message.reply_text(
-        "✅ وجدنا حساب قريب من طلبك:\n\n"
-        f"👤 الاقتراح: `{sug['username']}`\n\n"
-        "هل تريد اعتماده؟",
-        parse_mode="Markdown",
-        reply_markup=ik_suggest_accept()
-    )
-    return ST_E_USER
-
-async def eish_get_pass(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Password is now auto-assigned from the iChancy pool.
-    await update.message.reply_text(
-        "✅ النظام الجديد لا يطلب كلمة مرور. اختر (إنشاء حساب) وأدخل اسم المستخدم فقط.",
-        reply_markup=kb_eish_actions()
-    )
-    return ST_EISH_ACTION
-
-async def eish_topup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard_user(update, context):
-        return ConversationHandler.END
-
-    text = safe_text(update.message.text)
-    if text == BTN_BACK:
-        return await go_home(update, context)
-    if not text:
-        await update.message.reply_text("❌ كلمة المرور غير صالحة، حاول مجددًا.")
-        return ST_E_PASS
-
-    context.user_data["password"] = text
-    context.user_data["confirm_text"] = (
-        "هل تريد تأكيد طلب إنشاء الحساب؟\n\n"
-        f"اسم المستخدم: {context.user_data['username']}\n"
-        f"كلمة المرور: {context.user_data['password']}\n\n"
-        "ملاحظة: سيتم إرسال الطلب للأدمن، وقد يقوم بتعديل البيانات قبل اعتمادها."
-    )
-    await update.message.reply_text(context.user_data["confirm_text"], reply_markup=kb_confirm())
-    return ST_CONFIRM
-
-# ------- Balance Menu -------
+# =========================
+# معالجات الشحن
+# =========================
 async def balance_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard_user(update, context):
-        return ConversationHandler.END
-
-    uid = update.effective_user.id
     text = safe_text(update.message.text)
-
+    
     if text == BTN_BACK:
         return await go_home(update, context)
-
+    
     if text == BTN_BOT_TOPUP:
-        if has_pending_lock(uid):
-            await update.message.reply_text(
-                "⚠️ لديك طلب معلّق بالفعل.\nيرجى انتظار قبول/رفض الإدارة قبل إنشاء طلب جديد.",
-                reply_markup=kb_balance_menu()
-            )
-            return ST_BAL_MENU
-
         context.user_data.clear()
         context.user_data["flow"] = "bot_topup"
-        await update.message.reply_text("اختر طريقة الشحن:", reply_markup=kb_methods())
+        await update.message.reply_text("اختر طريقة:", reply_markup=kb_methods())
         return ST_TOPUP_METHOD
-
-    if text == BTN_BOT_WITHDRAW:
-        if has_pending_lock(uid):
-            await update.message.reply_text(
-                "⚠️ لديك طلب معلّق بالفعل.\nيرجى انتظار قبول/رفض الإدارة قبل إنشاء طلب جديد.",
-                reply_markup=kb_balance_menu()
-            )
-            return ST_BAL_MENU
-
-        context.user_data.clear()
-        context.user_data["flow"] = "bot_withdraw"
-        await update.message.reply_text("اختر طريقة السحب:", reply_markup=kb_methods())
-        return ST_WITHDRAW_METHOD
-
-    await update.message.reply_text("❌ الرجاء اختيار خيار صحيح", reply_markup=kb_balance_menu())
+    
+    await update.message.reply_text("❌ خيار غير صحيح", reply_markup=kb_balance_menu())
     return ST_BAL_MENU
 
-# ------- Topup (bot) -------
 async def topup_choose_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard_user(update, context):
-        return ConversationHandler.END
-
     text = safe_text(update.message.text)
+    
     if text == BTN_BACK:
         return await go_home(update, context)
-
-    if text == BTN_SHAM:
-        await update.message.reply_text(msg_support(), reply_markup=kb_balance_menu())
-        return ST_BAL_MENU
-
+    
     if text == BTN_SYRIATEL:
         s = get_settings()
         context.user_data["method"] = "SYRIATEL"
         context.user_data["syriatel_code"] = s["syriatel_code"]
         await update.message.reply_text(
-            f"✅ قم بإرسال المبلغ عبر التحويل اليدوي إلى الكود:\n{s['syriatel_code']}\n\n"
-            "الآن اكتب رقم عملية التحويل:",
+            f"أرسل إلى الكود: {s['syriatel_code']}\nثم أدخل رقم العملية:",
             reply_markup=kb_back()
         )
         return ST_TOPUP_TXID
-
-    await update.message.reply_text("❌ الرجاء اختيار خيار صحيح", reply_markup=kb_methods())
+    
+    await update.message.reply_text("❌ خيار غير صحيح", reply_markup=kb_methods())
     return ST_TOPUP_METHOD
 
 async def topup_get_txid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard_user(update, context):
-        return ConversationHandler.END
-
     text = safe_text(update.message.text)
+    
     if text == BTN_BACK:
         return await go_home(update, context)
-
+    
     if not is_reasonable_txid(text):
-        await update.message.reply_text("❌ رقم العملية غير صالح. أدخل أرقام فقط (من 6 إلى 20 رقم).")
+        await update.message.reply_text("❌ رقم غير صالح (6-20 رقم)")
         return ST_TOPUP_TXID
-
-    s = get_settings()
+    
+    # فحص التكرار
+    uid = update.effective_user.id
+    tx_info = tx_manager.get_transaction_info(text)
+    
+    if tx_info:
+        if tx_info.get("user_id") == uid:
+            await update.message.reply_text(
+                f"⚠️ لقد استخدمت هذا الرقم مسبقاً\n\n"
+                f"الرقم: `{text}`\n"
+                f"المبلغ السابق: {tx_info.get('amount', 0)}\n\n"
+                f"هل تريد المتابعة؟ (نعم/لا)",
+                parse_mode="Markdown",
+                reply_markup=ReplyKeyboardMarkup([
+                    [KeyboardButton("نعم"), KeyboardButton("لا")],
+                    [KeyboardButton(BTN_BACK)]
+                ], resize_keyboard=True)
+            )
+            context.user_data["checking_duplicate"] = text
+            return ST_DUPLICATE_CHECK
+        else:
+            await update.message.reply_text(
+                f"❌ هذا الرقم مستخدم من قبل مستخدم آخر\n\n"
+                f"يرجى استخدام رقم عملية مختلف.",
+                parse_mode="Markdown"
+            )
+            return ST_TOPUP_TXID
+    
     context.user_data["tx_id"] = text
-    context.user_data["amount_min"] = int(s["min_topup"])
+    s = get_settings()
     await update.message.reply_text(
-        f"اكتب قيمة المبلغ (بالأرقام فقط) — الحد الأدنى للشحن هو {s['min_topup']}:",
+        f"أدخل المبلغ (الحد الأدنى: {s['min_topup']}):",
         reply_markup=kb_back()
     )
     return ST_AMOUNT
 
-# ------- Withdraw (bot) -------
-async def topup_choose_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard_user(update, context):
-        return ConversationHandler.END
-
+async def handle_duplicate_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = safe_text(update.message.text)
+    tx_id = context.user_data.get("checking_duplicate", "")
+    
     if text == BTN_BACK:
         return await go_home(update, context)
-
-    s = get_settings()
-    codes = s.get("syriatel_codes") or [s.get("syriatel_code")]
-    if text not in [str(c) for c in codes]:
-        await update.message.reply_text("❌ اختر كود تحويل صحيح من القائمة:", reply_markup=kb_topup_codes())
-        return ST_TOPUP_CODE
-
-    context.user_data["syriatel_code"] = str(text).strip()
-
-    amount = int(context.user_data.get("amount", 0))
-    tx_id = context.user_data.get("tx_id")
-    context.user_data["confirm_text"] = (
-        "هل تريد تأكيد طلب الشحن؟\n\n"
-        "الطريقة: سيرياتيل كاش\n"
-        f"كود التحويل: {context.user_data['syriatel_code']}\n"
-        f"رقم العملية: {tx_id}\n"
-        f"المبلغ: {amount}"
-    )
-    await update.message.reply_text(context.user_data["confirm_text"], reply_markup=kb_confirm())
-    return ST_CONFIRM
-
-
-async def withdraw_choose_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard_user(update, context):
-        return ConversationHandler.END
-
-    text = safe_text(update.message.text)
-    if text == BTN_BACK:
-        return await go_home(update, context)
-
-    if text == BTN_SHAM:
-        await update.message.reply_text(msg_support(), reply_markup=kb_balance_menu())
-        return ST_BAL_MENU
-
-    if text == BTN_SYRIATEL:
-        context.user_data["method"] = "SYRIATEL"
-        await update.message.reply_text("✅ اكتب الرقم الذي سيتم إرسال المبلغ عليه (رقم سيرياتيل):", reply_markup=kb_back())
-        return ST_WITHDRAW_NUMBER
-
-    await update.message.reply_text("❌ الرجاء اختيار خيار صحيح", reply_markup=kb_methods())
-    return ST_WITHDRAW_METHOD
-
-async def withdraw_get_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard_user(update, context):
-        return ConversationHandler.END
-
-    text = safe_text(update.message.text)
-    if text == BTN_BACK:
-        return await go_home(update, context)
-
-    if not is_reasonable_phone(text):
-        await update.message.reply_text("❌ الرقم غير صالح. أدخل أرقام فقط (من 7 إلى 14 رقم).")
-        return ST_WITHDRAW_NUMBER
-
-    s = get_settings()
-    context.user_data["payout_number"] = text
-    context.user_data["amount_min"] = int(s["min_withdraw"])
-    await update.message.reply_text(
-        f"اكتب قيمة المبلغ (بالأرقام فقط) — الحد الأدنى للسحب هو {s['min_withdraw']}:",
-        reply_markup=kb_back()
-    )
-    return ST_AMOUNT
-
-# ------- Amount (shared) -------
-async def get_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard_user(update, context):
-        return ConversationHandler.END
-
-    text = safe_text(update.message.text)
-    if text == BTN_BACK:
-        return await go_home(update, context)
-
-    if not is_pos_int(text):
-        await update.message.reply_text("❌ الرجاء إدخال مبلغ صحيح (أرقام فقط) وأكبر من 0")
-        return ST_AMOUNT
-
-    amount = int(text)
-    min_needed = int(context.user_data.get("amount_min", 1))
-    if amount < min_needed:
-        await update.message.reply_text(f"❌ الحد الأدنى لهذه العملية هو {min_needed}. اكتب مبلغًا أكبر:")
-        return ST_AMOUNT
-
-    uid = update.effective_user.id
-    flow = context.user_data.get("flow")
-    action = context.user_data.get("action")
-
-    if flow == "bot_withdraw":
-        balance, _ = get_wallet(uid)
-        if amount > balance:
-            await update.message.reply_text(f"❌ رصيدك غير كافٍ. رصيدك الحالي: {balance}\nاكتب مبلغًا أصغر:")
-            return ST_AMOUNT
-
-    if flow == "eishancy" and action == BTN_E_TOPUP:
-        balance, _ = get_wallet(uid)
-        if amount > balance:
-            await update.message.reply_text(f"❌ رصيدك غير كافٍ. رصيدك الحالي: {balance}\nاكتب مبلغًا أصغر:")
-            return ST_AMOUNT
-
-    context.user_data["amount"] = amount
-
-    s = get_settings()
-    if flow == "bot_topup":
-        context.user_data["confirm_text"] = (
-            "هل تريد تأكيد طلب الشحن؟\n\n"
-            "الطريقة: سيرياتيل كاش\n"
-            f"كود التحويل: {context.user_data.get('syriatel_code', s['syriatel_code'])}\n"
-            f"رقم العملية: {context.user_data.get('tx_id')}\n"
-            f"المبلغ: {amount}"
-        )
-    elif flow == "bot_withdraw":
-        context.user_data["confirm_text"] = (
-            "هل تريد تأكيد طلب السحب؟\n\n"
-            "الطريقة: سيرياتيل كاش\n"
-            f"الرقم المستلم: {context.user_data.get('payout_number')}\n"
-            f"المبلغ: {amount}\n\n"
-            "ملاحظة: سيتم حجز المبلغ فور الإرسال ويُعاد تلقائيًا إذا تم الرفض."
-        )
-    elif flow == "eishancy":
-        if action == BTN_E_TOPUP:
-            e = get_eish(uid)
-            context.user_data["confirm_text"] = "\n".join([
-                "هل تريد تأكيد شحن حساب إيـشانسي؟",
-                "",
-                f"حساب إيـشانسي: {e.get('username') if e else '-'}",
-                f"المبلغ: {amount}",
-                "",
-                "ملاحظة: سيتم حجز المبلغ من رصيد البوت فور الإرسال.",
-            ])
-        elif action == BTN_E_WITH:
-            e = get_eish(uid)
-            context.user_data["confirm_text"] = "\n".join([
-                "هل تريد تأكيد سحب من حساب إيـشانسي إلى رصيد البوت؟",
-                "",
-                f"حساب إيـشانسي: {e.get('username') if e else '-'}",
-                f"المبلغ: {amount}",
-                "",
-                "ملاحظة: عند موافقة الأدمن سيتم إضافة المبلغ إلى رصيدك داخل البوت.",
-            ])
-        else:
-            context.user_data["confirm_text"] = f"هل تريد تأكيد العملية بالمبلغ: {amount} ؟"
-    else:
-        context.user_data["confirm_text"] = f"هل تريد تأكيد العملية بالمبلغ: {amount} ؟"
-
-    await update.message.reply_text(context.user_data["confirm_text"], reply_markup=kb_confirm())
-    return ST_CONFIRM
-
-# ------- Confirm (shared) -------
-async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard_user(update, context):
-        return ConversationHandler.END
-
-    text = safe_text(update.message.text)
-    if text == BTN_BACK:
-        return await go_home(update, context)
-
-    uid = update.effective_user.id
-
-    if text == BTN_CANCEL:
-        context.user_data.clear()
-        await update.message.reply_text("❌ تم إلغاء العملية.", reply_markup=kb_main())
-        return ST_MAIN
-
-    if text != BTN_CONFIRM:
-        await update.message.reply_text("❌ اختر (✅ تأكيد) أو (❌ إلغاء).", reply_markup=kb_confirm())
-        return ST_CONFIRM
-
-    flow = context.user_data.get("flow")
-    user = update.effective_user
-    # إنشاء حساب إيـشانسي (مخزون تلقائي)
-    # تم استبدال النظام القديم (طلب للأدمن) بنظام مخزون حسابات.
-    # المستخدم يحصل على الحساب فورًا من المخزون داخل eish_get_user / user_cb.
-
-
-    # حذف حساب إيـشانسي
-    if flow == "eishancy" and context.user_data.get("action") == BTN_E_DEL:
-        if delete_eish(uid):
-            add_history(uid, {"ts": int(time.time()), "event": "deleted", "type": "eish_delete", "order_id": "-", "amount": 0})
-            await update.message.reply_text("✅ تم حذف حساب إيـشانسي المحفوظ بنجاح.", reply_markup=kb_main())
-        else:
-            await update.message.reply_text("ℹ️ لا يوجد لديك حساب إيـشانسي محفوظ.", reply_markup=kb_main())
-        context.user_data.clear()
-        return ST_MAIN
-
-    # شحن إيـشانسي: حجز فوري + تثبيت عند القبول
-    if flow == "eishancy" and context.user_data.get("action") == BTN_E_TOPUP:
-        e = get_eish(uid)
-        if not e:
-            context.user_data.clear()
-            await update.message.reply_text("⚠️ لازم تعمل (إنشاء حساب) إيـشانسي أولاً.", reply_markup=kb_main())
-            return ST_MAIN
-
-        amount = int(context.user_data.get("amount", 0))
-        balance, _ = get_wallet(uid)
-        if amount <= 0 or amount > balance:
-            context.user_data.clear()
-            await update.message.reply_text("❌ لا يمكن تنفيذ الطلب (مبلغ غير صالح أو رصيد غير كافٍ).", reply_markup=kb_main())
-            return ST_MAIN
-
-        try:
-            adjust_wallet(uid, delta_balance=-amount, delta_hold=+amount)
-        except ValueError:
-            context.user_data.clear()
-            await update.message.reply_text("❌ حدث خطأ في الرصيد. حاول لاحقًا أو تواصل مع الدعم.", reply_markup=kb_main())
-            return ST_MAIN
-
-        order_id = make_order_id("EIST")
-        order = {
-            "order_id": order_id,
-            "type": "eish_topup",
-            "status": "pending",
-            "user_id": uid,
-            "username": user.username or "",
-            "eish_username": e.get("username", ""),
-            "amount": amount,
-            "created_at": int(time.time()),
-        }
-        add_order(order)
-
-        if rollback_order_if_exceeds_pending(uid, order_id):
-            try:
-                adjust_wallet(uid, delta_hold=-amount, delta_balance=+amount)
-            except Exception:
-                pass
-            context.user_data.clear()
-            await update.message.reply_text("⚠️ لديك طلب معلّق بالفعل. تم إلغاء الطلب الجديد.", reply_markup=kb_main())
-            return ST_MAIN
-
-        add_history(uid, {"ts": int(time.time()), "event": "created", "type": "eish_topup", "order_id": order_id, "amount": amount})
-
-        admin_msg = (
-            "📩 طلب شحن حساب إيـشانسي:\n"
-            f"OrderID: {order_id}\n"
-            f"UserID: {uid}\n"
-            f"حساب iChancy: {order['eish_username']}\n"
-            f"المبلغ: {amount}\n\n"
-            "ملاحظة: تم حجز المبلغ من رصيد المستخدم داخل البوت."
-        )
-
-        _base_kb = ik_order_actions(order_id, allow_edit=False)
-        _rows = [
-            [InlineKeyboardButton("📋 نسخ اسم الحساب", callback_data=f"AD:COPY_EISH:{order_id}")],
-            *_base_kb.inline_keyboard
-        ]
-        await notify_admins(context, text=admin_msg, reply_markup=InlineKeyboardMarkup(_rows), order_id=order_id)
-
-        context.user_data.clear()
-        await update.message.reply_text(msg_pending_notice() + "\n\n⏳ تم حجز المبلغ من رصيدك مؤقتًا.", reply_markup=kb_main())
-        return ST_MAIN
-
-    # سحب من إيـشانسي إلى رصيد البوت: عند القبول يضاف
-    if flow == "eishancy" and context.user_data.get("action") == BTN_E_WITH:
-        e = get_eish(uid)
-        if not e:
-            context.user_data.clear()
-            await update.message.reply_text("⚠️ لازم تعمل (إنشاء حساب) إيـشانسي أولاً.", reply_markup=kb_main())
-            return ST_MAIN
-
-        amount = int(context.user_data.get("amount", 0))
-        if amount <= 0:
-            context.user_data.clear()
-            await update.message.reply_text("❌ مبلغ غير صالح.", reply_markup=kb_main())
-            return ST_MAIN
-
-        order_id = make_order_id("EISW")
-        order = {
-            "order_id": order_id,
-            "type": "eish_withdraw_to_bot",
-            "status": "pending",
-            "user_id": uid,
-            "username": user.username or "",
-            "eish_username": e.get("username", ""),
-            "amount": amount,
-            "created_at": int(time.time()),
-        }
-        add_order(order)
-
-        if rollback_order_if_exceeds_pending(uid, order_id):
-            context.user_data.clear()
-            await update.message.reply_text("⚠️ لديك طلب معلّق بالفعل. تم إلغاء الطلب الجديد.", reply_markup=kb_main())
-            return ST_MAIN
-
-        add_history(uid, {"ts": int(time.time()), "event": "created", "type": "eish_withdraw_to_bot", "order_id": order_id, "amount": amount})
-
-        admin_msg = (
-            "📩 طلب سحب من إيـشانسي إلى رصيد البوت:\n"
-            f"OrderID: {order_id}\n"
-            f"UserID: {uid}\n"
-            f"Eishancy Username: {order['eish_username']}\n"
-            f"المبلغ: {amount}\n\n"
-            "ملاحظة: عند القبول سيتم إضافة المبلغ إلى رصيد المستخدم داخل البوت."
-        )
-        await notify_admins(context, text=admin_msg, reply_markup=ik_order_actions(order_id, allow_edit=False, extra_rows=[[InlineKeyboardButton("📋 نسخ حساب إيـشانسي", callback_data=f"OD:COPYEISH:{order_id}")]]), order_id=order_id)
-
-        context.user_data.clear()
-        await update.message.reply_text(msg_pending_notice(), reply_markup=kb_main())
-        return ST_MAIN
-
-    # شحن رصيد البوت
-    if flow == "bot_topup":
+    
+    if text == "نعم":
+        # متابعة مع الرقم المكرر
         s = get_settings()
-        order_id = make_order_id("TOP")
-        tx_id = context.user_data.get("tx_id")
-        amount = int(context.user_data.get("amount", 0))
-
-        order = {
-            "order_id": order_id,
-            "type": "bot_topup",
-            "method": "SYRIATEL",
-            "status": "pending",
-            "user_id": uid,
-            "username": user.username or "",
-            "tx_id": tx_id,
-            "syriatel_code": context.user_data.get("syriatel_code", s["syriatel_code"]),
-            "amount": amount,
-            "created_at": int(time.time()),
-        }
-        add_order(order)
-
-        if rollback_order_if_exceeds_pending(uid, order_id):
-            context.user_data.clear()
-            await update.message.reply_text("⚠️ لديك طلب معلّق بالفعل. تم إلغاء الطلب الجديد.", reply_markup=kb_main())
-            return ST_MAIN
-
-        add_history(uid, {"ts": int(time.time()), "event": "created", "type": "bot_topup", "order_id": order_id, "amount": amount})
-
-        admin_text = (
-            "📩 طلب شحن رصيد البوت:\n"
-            f"OrderID: {order_id}\n"
-            "الطريقة: سيرياتيل كاش\n"
-            f"كود التحويل: {order['syriatel_code']}\n"
-            f"رقم العملية: {tx_id}\n"
-            f"المبلغ: {amount}\n"
-            f"UserID: {uid}"
+        await update.message.reply_text(
+            f"أدخل المبلغ (الحد الأدنى: {s['min_topup']}):",
+            reply_markup=kb_back()
         )
-        await notify_admins(context, text=admin_text, reply_markup=ik_order_actions(order_id, allow_edit=False), order_id=order_id)
-
-        context.user_data.clear()
-        await update.message.reply_text(msg_pending_notice(), reply_markup=kb_main())
-        return ST_MAIN
-
-    # سحب رصيد البوت: حجز فوري
-    if flow == "bot_withdraw":
-        order_id = make_order_id("WDR")
-        payout = context.user_data.get("payout_number")
-        amount = int(context.user_data.get("amount", 0))
-
-        try:
-            adjust_wallet(uid, delta_balance=-amount, delta_hold=+amount)
-        except ValueError:
-            context.user_data.clear()
-            await update.message.reply_text("❌ حدث خطأ في الرصيد. حاول لاحقًا أو تواصل مع الدعم.", reply_markup=kb_main())
-            return ST_MAIN
-
-        order = {
-            "order_id": order_id,
-            "type": "bot_withdraw",
-            "method": "SYRIATEL",
-            "status": "pending",
-            "user_id": uid,
-            "username": user.username or "",
-            "payout_number": payout,
-            "amount": amount,
-            "created_at": int(time.time()),
-        }
-        add_order(order)
-
-        if rollback_order_if_exceeds_pending(uid, order_id):
-            try:
-                adjust_wallet(uid, delta_hold=-amount, delta_balance=+amount)
-            except Exception:
-                pass
-            context.user_data.clear()
-            await update.message.reply_text("⚠️ لديك طلب معلّق بالفعل. تم إلغاء الطلب الجديد.", reply_markup=kb_main())
-            return ST_MAIN
-
-        add_history(uid, {"ts": int(time.time()), "event": "created", "type": "bot_withdraw", "order_id": order_id, "amount": amount})
-
-        admin_text = (
-            "📩 طلب سحب رصيد البوت:\n"
-            f"OrderID: {order_id}\n"
-            "الطريقة: سيرياتيل كاش\n"
-            f"الرقم المستلم: {payout}\n"
-            f"المبلغ: {amount}\n"
-            f"UserID: {uid}\n\n"
-            "تنبيه: تم حجز المبلغ من رصيد المستخدم مباشرة."
+        return ST_AMOUNT
+    elif text == "لا":
+        # إدخال رقم جديد
+        await update.message.reply_text(
+            "أدخل رقم عملية جديد:",
+            reply_markup=kb_back()
         )
-        await notify_admins(context, text=admin_text, reply_markup=ik_order_actions(order_id, allow_edit=False), order_id=order_id)
+        return ST_TOPUP_TXID
+    
+    await update.message.reply_text("❌ اختر نعم أو لا", reply_markup=kb_back())
+    return ST_DUPLICATE_CHECK
 
-        context.user_data.clear()
-        await update.message.reply_text(msg_pending_notice() + "\n\n⏳ تم حجز المبلغ من رصيدك مؤقتًا.", reply_markup=kb_main())
-        return ST_MAIN
-
+async def get_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = safe_text(update.message.text)
+    
+    if text == BTN_BACK:
+        return await go_home(update, context)
+    
+    if not is_pos_int(text):
+        await update.message.reply_text("❌ أدخل رقم صحيح")
+        return ST_AMOUNT
+    
+    amount = int(text)
+    uid = update.effective_user.id
+    s = get_settings()
+    
+    if amount < s["min_topup"]:
+        await update.message.reply_text(f"❌ الحد الأدنى: {s['min_topup']}")
+        return ST_AMOUNT
+    
+    # التحقق من التكرار النهائي
+    tx_id = context.user_data.get("tx_id", "")
+    if tx_id:
+        duplicate_check = await check_transaction_duplicate(tx_id, amount, s["syriatel_code"], uid)
+        
+        if not duplicate_check["allowed"]:
+            await update.message.reply_text(
+                f"❌ **مرفوض**: {duplicate_check['reason']}\n\n"
+                f"رقم العملية: `{tx_id}`\n"
+                f"المبلغ: {amount}\n\n"
+                f"استخدم رقم عملية مختلف.",
+                parse_mode="Markdown"
+            )
+            return ST_TOPUP_TXID
+    
+    # إنشاء الطلب
+    user = update.effective_user
+    order_id = make_order_id("TOP")
+    order = {
+        "order_id": order_id,
+        "type": "bot_topup",
+        "status": "pending",
+        "user_id": uid,
+        "username": user.username or "",
+        "tx_id": tx_id,
+        "syriatel_code": s["syriatel_code"],
+        "amount": amount,
+        "created_at": int(time.time()),
+    }
+    add_order(order)
+    
+    await update.message.reply_text(
+        "✅ تم إرسال طلب الشحن\n⏳ جاري التحقق الآلي...",
+        reply_markup=kb_main()
+    )
+    
+    # إشعار الأدمن
+    admin_msg = f"📩 طلب شحن جديد\nOrderID: {order_id}\nالمبلغ: {amount}\nالمستخدم: {uid}"
+    await notify_admins(context, admin_msg, order_id=order_id)
+    
     context.user_data.clear()
-    await update.message.reply_text("✅ تم.", reply_markup=kb_main())
     return ST_MAIN
 
 # =========================
-# Admin: /admin
+# معالجات الأدمن
 # =========================
+def ik_admin_home():
+    settings = get_settings()
+    auto_status = "✅ مفعل" if settings.get("auto_verify_enabled") else "❌ معطل"
+    
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📥 الطلبات المعلقة", callback_data="AD:PENDING:0"),
+         InlineKeyboardButton("📜 آخر الطلبات", callback_data="AD:LAST:0")],
+        [InlineKeyboardButton(f"🤖 تحقق آلي: {auto_status}", callback_data="AD:AUTO_TOGGLE")],
+        [InlineKeyboardButton("📊 إحصائيات", callback_data="AD:STATS"),
+         InlineKeyboardButton("⚙️ إعدادات", callback_data="AD:SETTINGS")],
+        [InlineKeyboardButton("🔍 فحص تكرار", callback_data="AD:CHECK_DUPLICATE")]
+    ])
+
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ هذا القسم للأدمن فقط.")
+        await update.message.reply_text("❌ للأدمن فقط")
         return
-    context.user_data.pop("admin_mode", None)
-    await update.message.reply_text("لوحة الأدمن ✅", reply_markup=ik_admin_home())
+    
+    await update.message.reply_text("👑 لوحة الأدمن", reply_markup=ik_admin_home())
 
-# =========================
-# Admin callback
-# =========================
-# =========================
-# User callback (suggestion accept + copy + redeem)
-# =========================
-async def user_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    if not q:
+async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    user_id = query.from_user.id
+    
+    if not is_admin(user_id):
         return
-    data = (q.data or "").strip()
-    await q.answer()
-
-    uid = q.from_user.id
-
-    # Copy creds (send as plain message so user can copy)
-    if data in ("CP:U","COPY:USER"):
-        u = (context.user_data.get("last_username") or "").strip()
-        if u:
-            await q.message.reply_text(u)
-        return
-
-    if data in ("CP:P","COPY:PASS"):
-        p = (context.user_data.get("last_password") or "").strip()
-        if p:
-            await q.message.reply_text(p)
-        return
-
-    # Referral redeem
-    if data == "RF:REDEEM":
-        pts = get_points(uid)
-        if pts < 100:
-            await q.message.reply_text("⚠️ نقاطك غير كافية للاستبدال حالياً. تحتاج إلى 100 نقطة.")
-            return
-        # Redeem: -100 points, +10000 to bot balance
-        add_points(uid, -100)
-        try:
-            adjust_wallet(uid, delta_balance=+10000)
-        except Exception:
-            # rollback points if wallet failed for any reason
-            add_points(uid, +100)
-            await q.message.reply_text("❌ حدث خطأ أثناء الاستبدال. حاول لاحقاً.")
-            return
-        b, h = get_wallet(uid)
-        await q.message.reply_text(f"✅ تم الاستبدال بنجاح!\n+10000 إلى رصيد البوت.\n\nرصيدك الآن: {b}\n⏳ محجوز: {h}")
-        return
-
-    # Suggestion flow (auto pool)
-    if data == "EISH:MENU":
-        await q.message.reply_text("اختر الإجراء الذي تريد تنفيذه:", reply_markup=kb_eish_actions())
-        return
-
-    if data == "EISH:RETRY":
-        context.user_data.pop("suggest_username", None)
-        await q.message.reply_text("✏️ اكتب اسم مستخدم جديد:", reply_markup=kb_back())
-        return
-
-    if data == "EISH:ACCEPT":
-        sug = (context.user_data.get("suggest_username") or "").strip()
-        if not sug:
-            await q.message.reply_text("⚠️ لا يوجد اقتراح حاليًا. اكتب اسم مستخدم جديد:", reply_markup=kb_back())
-            return
-        if get_eish(uid):
-            context.user_data.pop("suggest_username", None)
-            await q.message.reply_text("⚠️ لديك حساب إيـشانسي محفوظ بالفعل.", reply_markup=kb_eish_actions())
-            return
-
-        assigned = await assign_pool_account(uid, sug)
-        if not assigned:
-            # Maybe taken; propose another one
-            new_sug = suggest_pool_account(sug)
-            if not new_sug:
-                context.user_data.pop("suggest_username", None)
-                await q.message.reply_text("❌ لا يوجد حسابات متاحة حالياً. حاول لاحقاً.", reply_markup=kb_eish_actions())
-                return
-            context.user_data["suggest_username"] = new_sug["username"]
-            await q.message.reply_text(
-                "⚠️ تم حجز الحساب المقترح من مستخدم آخر.\n\n"                f"✅ نقترح عليك هذا الحساب المتاح:\n{new_sug['username']}\n\n"                "هل تريد اعتماده؟",
-                reply_markup=ik_suggest_accept()
-            )
-            return
-
-        set_eish(uid, assigned["username"], assigned["password"])
-        context.user_data["last_username"] = assigned["username"]
-        context.user_data["last_password"] = assigned["password"]
-        context.user_data.pop("suggest_username", None)
-
-        await q.message.reply_text(
-            "✅ تم تجهيز حسابك بنجاح:\n\n"
-            f"```\nUsername: {assigned['username']}\nPassword: {assigned['password']}\n```",
-            parse_mode="Markdown",
-            reply_markup=ik_copy_creds()
-        )
-        return
-
-async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    if not q:
-        return
-
-    data = (q.data or "").strip()
-    await q.answer()
-
-    if not is_admin(q.from_user.id):
-        await q.message.reply_text("❌ هذا القسم للأدمن فقط.")
-        return
-
-    # ---- Helpers (inner) ----
-    async def _send_backup_once():
-        # Debounce: prevent Telegram retries / double taps from spamming backups
-        now = time.time()
-        last = context.bot_data.get("_last_manual_backup_ts", 0)
-        if now - last < 4:
-            return
-        context.bot_data["_last_manual_backup_ts"] = now
-
-        os.makedirs(BACKUP_DIR, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-        backup_path = os.path.join(BACKUP_DIR, f"backup-{ts}.zip")
-
-        include_paths = [
-            USERS_DB_PATH,
-            WALLET_DB_PATH,
-            ICHANCY_DB_PATH,
-            HOLD_DB_PATH,
-            POOL_DB_PATH,
-            SETTINGS_DB_PATH,
-            LOG_DB_PATH,
-        ]
-
-        # Build zip
-        with zipfile.ZipFile(backup_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for fp in include_paths:
-                try:
-                    if fp and os.path.exists(fp):
-                        zf.write(fp, arcname=os.path.basename(fp))
-                except Exception:
-                    continue
-
-        # Send zip
-        try:
-            await q.message.reply_document(document=open(backup_path, "rb"), filename=os.path.basename(backup_path))
-        except Exception as e:
-            await q.message.reply_text(f"❌ تعذر إرسال الـ Backup.\n{e}")
-            return
-
-        await q.message.reply_text("🗄️ Backup جاهز")
-
-    # ---- Copy helpers ----
-    if data.startswith("AD:COPY_EISH:"):
-        order_id = data.split(":", 2)[2]
-        order = get_order(order_id)
-        username = (order or {}).get("eish_username") or ""
-        if username:
-            await q.message.reply_text(username)
-        else:
-            await q.message.reply_text("ℹ️ لم يتم العثور على اسم الحساب لهذا الطلب.")
-        return
-
-    if data.startswith("COPY_EISH:"):
-        username = data.split(":", 1)[1]
-        if username:
-            await q.message.reply_text(username)
-        return
-
-    if data.startswith("OD:COPYEISH:"):
-        order_id = data.split(":", 2)[2] if ":" in data else ""
-        order = get_order(order_id) if order_id else None
-        if not order:
-            await q.message.reply_text("❌ الطلب غير موجود.")
-            return
-        eish_u = (order.get("eish_username") or "").strip()
-        if not eish_u:
-            await q.message.reply_text("❌ لا يوجد اسم حساب إيـشانسي داخل هذا الطلب.")
-            return
-        await q.message.reply_text(eish_u)
-        return
-
-    # ---- Admin main ----
-    if data == "AD:HOME":
-        context.user_data.pop("admin_mode", None)
-        await q.message.reply_text("لوحة الأدمن ✅", reply_markup=ik_admin_home())
-        return
-
-    if data == "AD:BACKUP":
-        await _send_backup_once()
-        return
-
-    if data == "AD:RESTORE":
-        context.user_data["admin_mode"] = "RESTORE_ZIP"
-        await q.message.reply_text(
-            "♻️ أرسل ملف الـ Backup بصيغة ZIP (الذي أرسله لك البوت سابقًا) كـ **ملف** (Document).\nبعد الإرسال سيتم الاستعادة فورًا.",
-            reply_markup=ik_admin_back(),
-            parse_mode="Markdown"
-        )
-        return
-
-    if data == "AD:MAINT":
-        m = get_maintenance()
-        if m.get("enabled"):
-            set_maintenance(False)
-            await broadcast_to_all_users(context, "✅ انتهت الصيانة — عاد البوت للعمل.")
-            await q.message.reply_text("✅ تم إيقاف وضع الصيانة.", reply_markup=ik_admin_home())
-        else:
-            set_maintenance(True)
-            await broadcast_to_all_users(context, "🛠️ تنبيه: البوت الآن في وضع الصيانة. قد تتوقف بعض الخدمات مؤقتًا.")
-            await q.message.reply_text("🛠️ تم تفعيل وضع الصيانة.", reply_markup=ik_admin_home())
-        return
-
-    if data == "AD:EPOOL":
-        await q.message.reply_text("🗂 إدارة مخزون حسابات إيـشانسي", reply_markup=ik_epool_home())
-        return
-
-    if data.startswith("AD:EPOOL:"):
-        sub = data.split(":", 2)[2]
-        if sub == "ADD":
-            context.user_data["admin_mode"] = "EPOOL_ADD"
-            await q.message.reply_text(
-                """➕ أرسل الحسابات بالجملة بهذا الشكل (سطر لكل حساب):
-username:password
-
-مثال:
-bro_ahmad22:bbb123bb
-bro_omar10:pass999
-""",
-                reply_markup=ik_admin_back()
-            )
-            return
-        if sub == "STATS":
-            st = pool_stats()
-            await q.message.reply_text(
-                f"""📊 إحصائيات المخزون
-
-إجمالي: {st['total']}
-متاح: {st['available']}
-موزع: {st['assigned']}""",
-                reply_markup=ik_epool_home()
-            )
-            return
-        if sub in ("AVAIL", "ASSIGNED"):
-            pool = _load_pool()
-            want = "available" if sub == "AVAIL" else "assigned"
-            items = [a for a in pool if a.get("status") == want]
-            lines = []
-            for a in items[:40]:
-                if want == "available":
-                    lines.append(f"- {a.get('username')}")
-                else:
-                    lines.append(f"- {a.get('username')} -> {a.get('assigned_to')}")
-            body = "\n".join(lines) if lines else "لا يوجد."
-            title = "📋 الحسابات المتاحة" if want == "available" else "📦 الحسابات الموزعة"
-            await q.message.reply_text(title + "\n\n" + body, reply_markup=ik_epool_home())
-            return
-
-    # ---- Orders (pending / last / search) ----
-    if data.startswith("AD:PENDING:"):
-        page = int(data.split(":")[-1])
-        s = get_settings()
-        per_page = int(s["admin_page_size"])
-        orders = [o for o in list_orders() if o.get("status") == "pending"]
-        start = page * per_page
-        chunk = orders[start:start + per_page]
-        has_prev = page > 0
-        has_next = start + per_page < len(orders)
-
-        if not chunk:
-            await q.message.reply_text("لا يوجد طلبات معلّقة حاليًا ✅", reply_markup=ik_admin_home())
-            return
-
-        await q.message.reply_text(
-            f"📥 الطلبات المعلقة — العدد: {len(orders)}",
-            reply_markup=ik_pagination("AD:PENDING", page, has_prev, has_next)
-        )
-
-        for o in chunk:
-            t = o.get("type")
-            if t == "eish_create":
-                text = (
-                    "🆕 طلب إنشاء إيـشانسي\n"
-                    f"OrderID: {o['order_id']}\n"
-                    f"UserID: {o['user_id']}\n"
-                    f"Username: {o.get('eish_username','')}\n"
-                    f"Password: {o.get('eish_password','')}"
-                )
-            elif t == "eish_topup":
-                text = (
-                    "💳 طلب شحن إيـشانسي\n"
-                    f"OrderID: {o['order_id']}\n"
-                    f"UserID: {o['user_id']}\n"
-                    f"Eishancy Username: {o.get('eish_username','')}\n"
-                    f"Amount: {o.get('amount')}\n"
-                    "⚠️ محجوز من رصيد المستخدم"
-                )
-            elif t == "eish_withdraw_to_bot":
-                text = (
-                    "⬇️ سحب من إيـشانسي إلى رصيد البوت\n"
-                    f"OrderID: {o['order_id']}\n"
-                    f"UserID: {o['user_id']}\n"
-                    f"Eishancy Username: {o.get('eish_username','')}\n"
-                    f"Amount: {o.get('amount')}\n"
-                    "✅ عند القبول سيتم إضافة الرصيد للمستخدم"
-                )
-            elif t == "bot_topup":
-                text = (
-                    "➕ شحن رصيد البوت\n"
-                    f"OrderID: {o['order_id']}\n"
-                    f"UserID: {o['user_id']}\n"
-                    f"Amount: {o.get('amount')}\n"
-                    f"TxID: {o.get('tx_id','')}"
-                )
-            elif t == "bot_withdraw":
-                text = (
-                    "➖ سحب رصيد البوت\n"
-                    f"OrderID: {o['order_id']}\n"
-                    f"UserID: {o['user_id']}\n"
-                    f"Amount: {o.get('amount')}\n"
-                    f"Payout: {o.get('payout_number','')}\n"
-                    "⚠️ محجوز من رصيد المستخدم"
-                )
-            else:
-                text = str(o)
-
-            allow_edit = (t == "eish_create")
-            if o.get("type") == "eish_topup":
-                extra = [[InlineKeyboardButton("📋 نسخ حساب إيـشانسي", callback_data=f"OD:COPYEISH:{o['order_id']}")]]
-                await q.message.reply_text(text, reply_markup=ik_order_actions(o["order_id"], allow_edit=allow_edit, extra_rows=extra))
-            else:
-                await q.message.reply_text(text, reply_markup=ik_order_actions(o["order_id"], allow_edit=allow_edit))
-        return
-
-    if data.startswith("AD:LAST:"):
-        page = int(data.split(":")[-1])
-        per_page = 10
-        orders = list_orders()
-        start = page * per_page
-        chunk = orders[start:start + per_page]
-        has_prev = page > 0
-        has_next = start + per_page < len(orders)
-
-        if not chunk:
-            await q.message.reply_text("لا يوجد طلبات بعد.", reply_markup=ik_admin_home())
-            return
-
-        lines = [f"📜 آخر الطلبات (صفحة {page + 1})"]
-        for o in chunk:
-            lines.append(f"- {o['order_id']} | {o['type']} | {o['status']} | {o.get('amount', 0)} | UID:{o['user_id']}")
-        await q.message.reply_text("\n".join(lines), reply_markup=ik_pagination("AD:LAST", page, has_prev, has_next))
-        return
-
-    if data == "AD:SEARCH":
-        context.user_data["admin_mode"] = "SEARCH"
-        await q.message.reply_text("أرسل OrderID للبحث (مثال: TOP-... أو WDR-... أو EISC-...)", reply_markup=ik_admin_back())
-        return
-
-    if data == "AD:USER":
-        context.user_data["admin_mode"] = "USER"
-        await q.message.reply_text("أرسل UserID لإدارته (أرقام فقط).", reply_markup=ik_admin_back())
-        return
-
-    # ---- Users list / info ----
-    if data.startswith("AD:USERS:"):
-        page = int(data.split(":")[-1])
-        s = get_settings()
-        per_page = int(s.get("admin_page_size", 6))
-        uids = get_all_user_ids()
-
-        if not uids:
-            await q.message.reply_text("لا يوجد مشتركين بعد.", reply_markup=ik_admin_home())
-            return
-
-        start = page * per_page
-        chunk = uids[start:start + per_page]
-        has_prev = page > 0
-        has_next = start + per_page < len(uids)
-
-        rows = []
-        for uid in chunk:
-            b, h = get_wallet(uid)
-            e = get_eish(uid)
-            tag = "✅" if e else "—"
-            prof = get_user_profile(uid)
-            un = prof.get("username") or ""
-            name = (prof.get("first_name") or "").strip()
-            shown = (f"@{un} " if un else "") + (name + " " if name else "")
-            rows.append([InlineKeyboardButton(f"{uid} | {shown}B:{b} H:{h} | E:{tag}", callback_data=f"AD:UINFO:{uid}:{page}")])
-
-        nav = []
-        if has_prev:
-            nav.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"AD:USERS:{page - 1}"))
-        nav.append(InlineKeyboardButton(f"📄 {page + 1}", callback_data="AD:HOME"))
-        if has_next:
-            nav.append(InlineKeyboardButton("التالي ➡️", callback_data=f"AD:USERS:{page + 1}"))
-        rows.append(nav)
-        rows.append([InlineKeyboardButton("⬅️ رجوع", callback_data="AD:HOME")])
-
-        await q.message.reply_text(f"👥 سجل المشتركين — العدد: {len(uids)}", reply_markup=InlineKeyboardMarkup(rows))
-        return
-
-    if data.startswith("AD:UINFO:"):
-        _, _, uid_s, page_s = data.split(":")
-        uid = int(uid_s)
-        page = int(page_s)
-
-        prof = get_user_profile(uid)
-        un = prof.get("username") or "-"
-        fn = (prof.get("first_name") or "-")
-        ln = (prof.get("last_name") or "")
-        last_seen = prof.get("last_seen")
-        last_seen_s = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(int(last_seen))) if last_seen else "-"
-        pcount = len(pending_for_user(uid))
-        admin_flag = '✅' if is_admin(uid) else '—'
-
-        b, h = get_wallet(uid)
-        banned, reason = is_banned(uid)
-        e = get_eish(uid)
-        e_user = e.get("username") if e else "-"
-
-        kb_rows = [[InlineKeyboardButton("⚙️ إدارة", callback_data=f"AD:USERID:{uid}")]]
-        if is_super_admin(q.from_user.id):
-            kb_rows.append([InlineKeyboardButton("🛡️ تبديل أدمن", callback_data=f"AD:TOGADMIN:{uid}:{page}")])
-        kb_rows.append([InlineKeyboardButton("⬅️ رجوع للسجل", callback_data=f"AD:USERS:{page}"), InlineKeyboardButton("⬅️ الرئيسية", callback_data="AD:HOME")])
-
-        await q.message.reply_text(
-            "👤 معلومات المشترك:\n"
-            f"UID: {uid}\n"
-            f"👤 @{un} | {fn} {ln}\n"
-            f"🕒 Last seen: {last_seen_s}\n"
-            f"🛡️ Admin: {admin_flag}\n"
-            f"🧩 Pending orders: {pcount}\n"
-            f"💰 Balance: {b}\n"
-            f"⏳ Hold: {h}\n"
-            f"🧾 Eishancy: {e_user}\n"
-            f"🚫 Banned: {banned}\n"
-            f"Reason: {reason or '-'}",
-            reply_markup=InlineKeyboardMarkup(kb_rows)
-        )
-        return
-
-    if data.startswith("AD:TOGADMIN:"):
-        _, _, uid_s, page_s = data.split(":")
-        uid = int(uid_s)
-        page = int(page_s)
-        if not is_super_admin(q.from_user.id):
-            await q.message.reply_text("❌ هذه العملية للسوبر أدمن فقط.", reply_markup=ik_admin_home())
-            return
-        if is_admin(uid):
-            ok = remove_admin(uid)
-            msg = "✅ تم إزالة صلاحية الأدمن." if ok else "❌ لا يمكن إزالة السوبر أدمن."
-        else:
-            add_admin(uid)
-            msg = "✅ تم تعيينه كأدمن."
-        await q.message.reply_text(
-            msg,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⬅️ رجوع للمستخدم", callback_data=f"AD:UINFO:{uid}:{page}")],
-                [InlineKeyboardButton("⬅️ رجوع للسجل", callback_data=f"AD:USERS:{page}")],
-                [InlineKeyboardButton("⬅️ الرئيسية", callback_data="AD:HOME")]
-            ])
-        )
-        return
-
-    if data.startswith("AD:USERID:"):
-        uid = int(data.split(":")[-1])
-        b, h = get_wallet(uid)
-        banned, reason = is_banned(uid)
-        e = get_eish(uid)
-        e_name = e.get("username") if e else "-"
-        context.user_data["admin_mode"] = f"USERCTX:{uid}"
-        await q.message.reply_text(
-            f"👤 إدارة مستخدم:\nUID: {uid}\n💰 Balance: {b}\n⏳ Hold: {h}\n"
-            f"🧾 Eishancy: {e_name}\n"
-            f"🚫 Banned: {banned}\nReason: {reason or '-'}\n\n"
-            "أوامر تحكم:\nADJ +1000 سبب\nADJ -500 سبب\nBAN السبب\nUNBAN\nHIST",
-            reply_markup=ik_admin_home()
-        )
-        return
-
-    if data == "AD:STATS":
+    
+    if data == "AD:AUTO_TOGGLE":
+        settings = get_settings()
+        new_status = not settings.get("auto_verify_enabled", False)
+        set_settings({"auto_verify_enabled": new_status})
+        
+        status_text = "✅ مفعل" if new_status else "❌ معطل"
+        await query.edit_message_text(f"🤖 التحقق الآلي: {status_text}")
+    
+    elif data == "AD:STATS":
         orders = list_orders()
         pending = sum(1 for o in orders if o.get("status") == "pending")
-        approved = sum(1 for o in orders if o.get("status") == "approved")
-        rejected = sum(1 for o in orders if o.get("status") == "rejected")
-        balances = _load_json(BALANCES_FILE)
-        total_balance = sum(int(v.get("balance", 0)) for v in balances.values()) if isinstance(balances, dict) else 0
-        total_hold = sum(int(v.get("hold", 0)) for v in balances.values()) if isinstance(balances, dict) else 0
-
-        await q.message.reply_text(
-            "📊 إحصائيات:\n"
-            f"📥 معلّق: {pending}\n"
-            f"✅ مقبول: {approved}\n"
-            f"❌ مرفوض: {rejected}\n\n"
-            f"💰 مجموع Balance: {total_balance}\n"
-            f"⏳ مجموع Hold: {total_hold}",
-            reply_markup=ik_admin_home()
+        completed = sum(1 for o in orders if o.get("status") == "completed")
+        verified_count = len(tx_manager.verified_tx)
+        
+        await query.edit_message_text(
+            f"📊 الإحصائيات:\n\n"
+            f"📥 معلق: {pending}\n"
+            f"✅ مكتمل: {completed}\n"
+            f"🔢 عمليات محققة: {verified_count}\n"
+            f"👥 مستخدمين: {len(get_all_user_ids())}"
         )
-        return
-
-    if data == "AD:SETTINGS":
-        s = get_settings()
-        context.user_data["admin_mode"] = "SETTINGS"
-        await q.message.reply_text(
-            "⚙️ الإعدادات الحالية:\n"
-            f"- Syriatel Code: {s['syriatel_code']}\n"
-            f"- Min Topup: {s['min_topup']}\n"
-            f"- Min Withdraw: {s['min_withdraw']}\n"
-            f"- Max Pending/User: {s['max_pending']}\n"
-            f"- Admin Page Size: {s['admin_page_size']}\n\n"
-            "لتعديلها أرسل:\n"
-            "SET syriatel_code=23547 min_topup=15000 min_withdraw=50000 max_pending=1 admin_page_size=6",
-            reply_markup=ik_admin_home()
-        )
-        return
-
-    # Unknown callback -> ignore safely
-    return
-async def admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    text = safe_text(update.message.text)
-    mode = context.user_data.get("admin_mode", "")
-    if not mode:
-        return
-
-    if mode == "EPOOL_ADD":
-        lines = [ln for ln in text.splitlines() if ln.strip()]
-        res = add_pool_bulk(lines)
-        context.user_data.pop("admin_mode", None)
-        st = pool_stats()
-        await update.message.reply_text(
-            f"✅ تم تحديث المخزون.\n\n"
-            f"مضاف: {res['added']}\n"
-            f"متجاهل/مكرر: {res['skipped']}\n\n"
-            f"📊 الآن: إجمالي {st['total']} | متاح {st['available']} | موزع {st['assigned']}",
-            reply_markup=ik_admin_home()
-        )
-        return
-
-    if mode.startswith("EDITCREATE:"):
-        order_id = mode.split(":", 1)[1]
-        order = get_order(order_id)
-        if not order or order.get("type") != "eish_create" or order.get("status") != "pending":
-            context.user_data.pop("admin_mode", None)
-            await update.message.reply_text("❌ لا يمكن تعديل هذا الطلب.", reply_markup=ik_admin_home())
-            return
-
-        parts = text.split()
-        if len(parts) < 2:
-            await update.message.reply_text("❌ اكتب بالشكل: username password", reply_markup=ik_admin_home())
-            return
-
-        new_user = parts[0].strip()
-        new_pass = " ".join(parts[1:]).strip()
-
-        update_order(order_id, {"eish_username": new_user, "eish_password": new_pass})
-        admin_log({"ts": int(time.time()), "admin_id": ADMIN_ID, "action": "edit_eish_create", "order_id": order_id})
-
-        uid = int(order["user_id"])
-        await context.bot.send_message(
-            chat_id=uid,
-            text=(
-                "✏️ تم تعديل بيانات حساب إيـشانسي من قبل الإدارة.\n\n"
-                f"👤 Username: {new_user}\n"
-                f"🔑 Password: {new_pass}\n\n"
-                "سيتم اعتماد هذه البيانات عند الموافقة النهائية."
-            )
-        )
-
-        context.user_data.pop("admin_mode", None)
-
-        # عرض ملخص محدث للأدمن بعد التعديل
-        await update.message.reply_text(
-            "✅ تم تحديث بيانات طلب إنشاء إيـشانسي بنجاح.\n\n"
-            f"OrderID: {order_id}\n"
-            f"UserID: {uid}\n"
-            f"Username: {new_user}\n"
-            f"Password: {new_pass}\n\n"
-            "الآن اضغط (✅ قبول) لاعتماد الحساب أو (❌ رفض).",
-            reply_markup=ik_order_actions(order_id, allow_edit=True)
-        )
-        return
-
     
-        # BROADCAST
-    if mode == "BCAST_COPY_WAIT":
-        if text.strip() in ("إلغاء", "الغاء", "cancel", "CANCEL"):
-            context.user_data.pop("admin_mode", None)
-            await update.message.reply_text("✅ تم إلغاء الإرسال الجماعي.", reply_markup=ik_admin_home())
-            return
-
-        # نأخذ الرسالة كما هي ونجهز معاينة/تأكيد
-        src_chat = update.effective_chat.id
-        src_mid = update.effective_message.message_id
-        context.user_data["bcast_src_chat"] = src_chat
-        context.user_data["bcast_src_mid"] = src_mid
-        context.user_data["admin_mode"] = "BCAST_COPY_CONFIRM"
-
-        uids = [u for u in get_all_user_ids() if not is_banned(u)[0]]
-        await update.message.reply_text(
-            f"📣 معاينة البث\n\n"
-            f"سيتم إرسال *نسخة* من الرسالة أعلاه إلى: *{len(uids)}* مستخدم (غير محظور).\n\n"
-            f"اضغط (✅ إرسال) للبدء أو (❌ إلغاء).",
+    elif data == "AD:CHECK_DUPLICATE":
+        await query.edit_message_text(
+            "🔍 للتحقق من تكرار رقم عملية:\n"
+            "استخدم الأمر: /checktx رقم_العملية\n\n"
+            "مثال:\n/checktx 123456789",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ إرسال", callback_data="AD:BCAST:CONFIRM")],
-                [InlineKeyboardButton("❌ إلغاء", callback_data="AD:BCAST:CANCEL")],
-                [InlineKeyboardButton("⬅️ الرئيسية", callback_data="AD:HOME")],
-            ]),
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="AD:HOME")]
+            ])
+        )
+    
+    elif data == "AD:HOME":
+        await query.edit_message_text("👑 لوحة الأدمن", reply_markup=ik_admin_home())
+
+# أوامر الأدمن الإضافية
+async def check_transaction_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """فحص تكرار رقم عملية"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ للأدمن فقط")
+        return
+    
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "📝 استخدام الأمر:\n/checktx رقم_العملية\n\nمثال:\n/checktx 123456789"
+        )
+        return
+    
+    tx_id = args[0].strip()
+    tx_info = tx_manager.get_transaction_info(tx_id)
+    
+    if tx_info:
+        tx_time = time.ctime(tx_info.get("verified_at", 0))
+        await update.message.reply_text(
+            f"🚨 **رقم العملية مستخدم مسبقاً!**\n\n"
+            f"📋 الرقم: `{tx_id}`\n"
+            f"💰 المبلغ: {tx_info.get('amount', 0)}\n"
+            f"👤 المستخدم: {tx_info.get('user_id', 'غير معروف')}\n"
+            f"📄 OrderID: {tx_info.get('order_id', 'غير معروف')}\n"
+            f"🕒 الوقت: {tx_time}\n\n"
+            f"⛔ **يجب رفض أي طلب جديد بهذا الرقم**",
             parse_mode="Markdown"
         )
-        return
-
-    if mode == "SETTINGS" and text.upper().startswith("SET "):
-        parts = text[4:].split()
-        updates = {}
-        for p in parts:
-            if "=" not in p:
-                continue
-            k, v = p.split("=", 1)
-            k, v = k.strip(), v.strip()
-            if k in (
-                "min_topup",
-                "min_withdraw",
-                "max_pending",
-                "admin_page_size",
-            ) and v.isdigit():
-                updates[k] = int(v)
-            elif k == "syriatel_code":
-                updates[k] = v
-        s = set_settings(updates)
-        admin_log({"ts": int(time.time()), "admin_id": ADMIN_ID, "action": "update_settings", "updates": updates})
-        context.user_data.pop("admin_mode", None)
-        await update.message.reply_text(f"✅ تم تحديث الإعدادات:\n{s}", reply_markup=ik_admin_home())
-        return
-
-    if mode == "SEARCH":
-        order = get_order(text)
-        context.user_data.pop("admin_mode", None)
-        if not order:
-            await update.message.reply_text("❌ لم يتم العثور على OrderID.", reply_markup=ik_admin_home())
-            return
-        allow_edit = (order.get("status") == "pending" and order.get("type") == "eish_create")
+    else:
         await update.message.reply_text(
-            f"🔎 نتيجة البحث:\n{order}",
-            reply_markup=ik_order_actions(order["order_id"], allow_edit=allow_edit) if order.get("status") == "pending" else ik_admin_home()
-        )
-        return
-
-    if mode == "USER":
-        if not text.isdigit():
-            await update.message.reply_text("❌ أرسل UserID أرقام فقط.", reply_markup=ik_admin_home())
-            return
-        uid = int(text)
-        b, h = get_wallet(uid)
-        banned, reason = is_banned(uid)
-        e = get_eish(uid)
-        e_name = e.get("username") if e else "-"
-        context.user_data["admin_mode"] = f"USERCTX:{uid}"
-        await update.message.reply_text(
-            f"👤 إدارة مستخدم:\nUID: {uid}\n💰 Balance: {b}\n⏳ Hold: {h}\n"
-            f"🧾 Eishancy: {e_name}\n"
-            f"🚫 Banned: {banned}\nReason: {reason or '-'}\n\n"
-            "أوامر:\nADJ +1000 سبب\nADJ -500 سبب\nBAN السبب\nUNBAN\nHIST",
-            reply_markup=ik_admin_home()
-        )
-        return
-
-    if mode.startswith("USERCTX:"):
-        uid = int(mode.split(":")[1])
-        upper = text.upper()
-
-        if upper == "HIST":
-            hist = get_history(uid)[-10:]
-            lines = [f"🧾 آخر 10 سجلات UID:{uid}:"]
-            for e in hist:
-                ts = int(e.get("ts", 0))
-                dt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)) if ts else "-"
-                lines.append(f"- {e.get('event')} | {e.get('type')} | {e.get('order_id')} | {e.get('amount')} | {dt}")
-            await update.message.reply_text("\n".join(lines), reply_markup=ik_admin_home())
-            return
-
-        if upper.startswith("BAN "):
-            reason = text[4:].strip() or "بدون سبب"
-            ban_user(uid, reason)
-            admin_log({"ts": int(time.time()), "admin_id": ADMIN_ID, "action": "ban", "uid": uid, "reason": reason})
-            await update.message.reply_text(f"⛔ تم حظر UID:{uid}\nالسبب: {reason}", reply_markup=ik_admin_home())
-            return
-
-        if upper == "UNBAN":
-            unban_user(uid)
-            admin_log({"ts": int(time.time()), "admin_id": ADMIN_ID, "action": "unban", "uid": uid})
-            await update.message.reply_text(f"✅ تم فك الحظر عن UID:{uid}", reply_markup=ik_admin_home())
-            return
-
-        if upper.startswith("ADJ "):
-            rest = text[4:].strip()
-            parts = rest.split(maxsplit=1)
-            if not parts:
-                await update.message.reply_text("❌ مثال: ADJ +1000 سبب", reply_markup=ik_admin_home())
-                return
-            try:
-                delta = int(parts[0])
-            except Exception:
-                await update.message.reply_text("❌ اكتب رقم صحيح مثل +1000 أو -500", reply_markup=ik_admin_home())
-                return
-            reason = parts[1] if len(parts) > 1 else "تعديل يدوي"
-            b_before, h_before = get_wallet(uid)
-            try:
-                b_after, h_after = adjust_wallet(uid, delta_balance=delta)
-            except ValueError:
-                await update.message.reply_text("❌ لا يمكن تعديل الرصيد ليصبح سالب.", reply_markup=ik_admin_home())
-                return
-            now = int(time.time())
-            add_history(uid, {"ts": now, "event": "admin_adjust", "type": "wallet", "order_id": "-", "amount": delta, "reason": reason})
-
-            admin_log({"ts": now, "admin_id": update.effective_user.id if update.effective_user else 0, "action": "adjust_balance", "uid": uid, "delta": delta, "reason": reason})
-
-            await update.message.reply_text(
-                "✅ تم تعديل الرصيد.\n"
-                f"قبل: Balance={b_before}, Hold={h_before}\n"
-                f"بعد:  Balance={b_after}, Hold={h_after}\n"
-                f"السبب: {reason}",
-                reply_markup=ik_admin_home()
-            )
-            return
-
-        await update.message.reply_text("ℹ️ أمر غير معروف. استخدم: ADJ / BAN / UNBAN / HIST", reply_markup=ik_admin_home())
-        return
-
-# =========================
-# Eishancy pool (pre-created accounts)
-# =========================
-_POOL_LOCK = asyncio.Lock()
-
-def _load_pool() -> List[Dict[str, Any]]:
-    data = _load_json(EISH_POOL_FILE)
-    if isinstance(data, list):
-        return data
-    return []
-
-def _save_pool(pool: List[Dict[str, Any]]) -> None:
-    _save_json(EISH_POOL_FILE, pool)
-
-def pool_stats() -> Dict[str, int]:
-    pool = _load_pool()
-    available = sum(1 for a in pool if a.get("status") == "available")
-    assigned = sum(1 for a in pool if a.get("status") == "assigned")
-    return {"total": len(pool), "available": available, "assigned": assigned}
-
-def add_pool_bulk(lines: List[str]) -> Dict[str, int]:
-    """lines: ['user:pass', ...]"""
-    pool = _load_pool()
-    existing = { (a.get("username") or "").lower() for a in pool }
-    added=0
-    skipped=0
-    for ln in lines:
-        ln=ln.strip()
-        if not ln or ln.startswith("#"):
-            continue
-        if ":" not in ln:
-            skipped += 1
-            continue
-        u,p = ln.split(":",1)
-        u=u.strip()
-        p=p.strip()
-        if not u or not p:
-            skipped += 1
-            continue
-        if u.lower() in existing:
-            skipped += 1
-            continue
-        pool.append({"username": u, "password": p, "status": "available", "assigned_to": None, "assigned_at": None})
-        existing.add(u.lower())
-        added += 1
-    _save_pool(pool)
-    return {"added": added, "skipped": skipped}
-
-def _normalize_username_for_match(s: str) -> str:
-    """Normalize username to improve matching (e.g. bro_ahmad22 -> ahmad)."""
-    s = (s or "").strip().lower()
-    # drop common prefix
-    if s.startswith("bro_"):
-        s = s[4:]
-    if s.startswith("bro"):
-        # e.g. broahmad
-        s = s[3:]
-    # remove separators
-    s = s.replace("_", "").replace("-", "").replace(" ", "")
-    # keep letters only for matching
-    s = re.sub(r"\d+", "", s)
-    s = re.sub(r"[^a-z]+", "", s)
-    return s
-
-def _parse_prefix_num(s: str):
-    """Legacy parser for usernames like bro_ahmad22 (returns (prefix, number))."""
-    m = re.match(r"^([a-zA-Z_]+)(\d+)$", (s or "").strip())
-    if not m:
-        return None, None
-    return m.group(1), int(m.group(2))
-
-def suggest_pool_account(desired_username: str) -> Dict[str, Any] | None:
-    """Return best available account dict.
-    - Works even if user types only a name like 'Ahmad' (without 'bro_').
-    - Uses simple fuzzy matching over available usernames.
-    """
-    desired_raw = (desired_username or "").strip()
-    if not desired_raw:
-        return None
-
-    desired_norm = _normalize_username_for_match(desired_raw)
-    if not desired_norm:
-        return None
-
-    pool = _load_pool()
-    candidates = [a for a in pool if a.get("status") == "available" and isinstance(a.get("username"), str)]
-    if not candidates:
-        return None
-
-    # Score candidates: prefer substring match, otherwise SequenceMatcher ratio
-    best = None
-    best_score = -1.0
-    for a in candidates:
-        uname = a.get("username") or ""
-        norm = _normalize_username_for_match(uname)
-        if not norm:
-            continue
-
-        # substring bonus
-        if desired_norm in norm or norm in desired_norm:
-            score = 2.0 + (len(desired_norm) / max(1, len(norm)))
-        else:
-            score = SequenceMatcher(None, desired_norm, norm).ratio()
-
-        if score > best_score:
-            best_score = score
-            best = a
-
-    # Require a minimum confidence unless substring match boosted it
-    if best is None:
-        return None
-    if best_score < 0.55:
-        # too weak match
-        return None
-    return best
-
-async def assign_pool_account(uid: int, username: str) -> Dict[str, Any] | None:
-    async with _POOL_LOCK:
-        pool = _load_pool()
-        # find exact available username
-        for a in pool:
-            if str(a.get("username","")) == username and a.get("status") == "available":
-                a["status"] = "assigned"
-                a["assigned_to"] = int(uid)
-                a["assigned_at"] = int(time.time())
-                _save_pool(pool)
-                return a
-        return None
-
-
-
-
-# =========================
-# Admin document handler (restore backup ZIP)
-# =========================
-async def admin_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Only admins
-    if not is_admin(update.effective_user.id):
-        return
-    mode = context.user_data.get("admin_mode", "")
-    if mode != "RESTORE_WAIT_ZIP":
-        return
-
-    doc = update.effective_message.document if update.effective_message else None
-    if not doc:
-        await update.message.reply_text("❌ لم أستلم ملفًا. أرسل ملف ZIP فقط.", reply_markup=ik_admin_home())
-        context.user_data.pop("admin_mode", None)
-        return
-
-    fn = (doc.file_name or "").lower()
-    if not fn.endswith(".zip"):
-        await update.message.reply_text("❌ الرجاء إرسال ملف بصيغة ZIP فقط.", reply_markup=ik_admin_home())
-        return
-
-    # Enter maintenance during restore (blocks users)
-    try:
-        if not get_maintenance().get("active"):
-            await maintenance_start(context, by=int(update.effective_user.id))
-    except Exception:
-        pass
-
-    tmp_dir = tempfile.mkdtemp(prefix="restore_")
-    zip_local = os.path.join(tmp_dir, "restore.zip")
-
-    try:
-        tg_file = await doc.get_file()
-        await tg_file.download_to_drive(custom_path=zip_local)
-
-        # Safety: pre-restore backup (best-effort)
-        try:
-            os.makedirs(BACKUP_DIR, exist_ok=True)
-            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-            pre_path = os.path.join(BACKUP_DIR, f"pre-restore-{ts}.zip")
-            include_paths = []
-            if os.path.isdir(DATA_DIR):
-                for root, dirs, files in os.walk(DATA_DIR):
-                    if os.path.abspath(root).startswith(os.path.abspath(BACKUP_DIR)):
-                        continue
-                    for f in files:
-                        if f.lower().endswith((".json", ".txt")):
-                            include_paths.append(os.path.join(root, f))
-            with zipfile.ZipFile(pre_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                for p in include_paths:
-                    arc = os.path.relpath(p, start=DATA_DIR)
-                    zf.write(p, arcname=arc)
-        except Exception:
-            pass
-
-        # Extract zip safely
-        extract_dir = os.path.join(tmp_dir, "unzipped")
-        os.makedirs(extract_dir, exist_ok=True)
-
-        with zipfile.ZipFile(zip_local, "r") as zf:
-            for info in zf.infolist():
-                name = info.filename
-                # prevent zip slip
-                if name.startswith("/") or name.startswith("\\") or ".." in name.replace("\\", "/").split("/"):
-                    raise ValueError("ملف ZIP غير آمن (مسارات غير مسموحة).")
-            zf.extractall(extract_dir)
-
-        # Copy extracted files into DATA_DIR (overwrite)
-        restored = 0
-        for root, dirs, files in os.walk(extract_dir):
-            for f in files:
-                if not f.lower().endswith((".json", ".txt")):
-                    continue
-                src = os.path.join(root, f)
-                rel = os.path.relpath(src, start=extract_dir)
-                dst = os.path.join(DATA_DIR, rel)
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                shutil.copy2(src, dst)
-                restored += 1
-
-        # Ensure required files exist after restore
-        _ensure_data_files()
-
-        context.user_data.pop("admin_mode", None)
-        await update.message.reply_text(
-            f"✅ تمت الاستعادة بنجاح.\n"
-            f"📦 الملفات التي تم استرجاعها: {restored}\n\n"
-            "🔁 يفضل إعادة تشغيل الخدمة على Railway لضمان تحميل البيانات فورًا.",
-            reply_markup=ik_admin_home()
+            f"✅ **رقم العملية غير مستخدم**\n\n"
+            f"📋 الرقم: `{tx_id}`\n"
+            f"📊 الحالة: متاح للاستخدام",
+            parse_mode="Markdown"
         )
 
-    except Exception as e:
-        context.user_data.pop("admin_mode", None)
-        await update.message.reply_text(f"❌ فشل الاستعادة: {e}", reply_markup=ik_admin_home())
-    finally:
-        try:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-        except Exception:
-            pass
-        # End maintenance if we started it via restore (best-effort)
-        try:
-            # keep maintenance if it was already active before? We didn't track; keep it simple: end now.
-            if get_maintenance().get("active"):
-                await maintenance_end(context, by=int(update.effective_user.id))
-        except Exception:
-            pass
 # =========================
-# Build app
+# بناء التطبيق
 # =========================
 def build_app():
     _ensure_data_files()
-    get_settings()
-
+    
     app = ApplicationBuilder().token(TOKEN).build()
-
-    # استثناء رسائل الأدمن من محادثة المستخدم حتى لا تتعارض مع أوامر لوحة الأدمن
-    user_text_filter = (filters.TEXT & ~filters.COMMAND & ~filters.User(ADMIN_ID))
-
-    # ✅ زر (تحقق من الاشتراك)
-    app.add_handler(CallbackQueryHandler(cb_check_join, pattern=f"^{CB_CHECK_JOIN}$"))
-
-    # Conversation
+    
+    # جدولة المهام
+    AUTO_VERIFY_INTERVAL = int(os.getenv("AUTO_VERIFY_INTERVAL", "300"))
+    if AUTO_VERIFY_INTERVAL > 0:
+        app.job_queue.run_repeating(stealth_auto_verification_job, 
+                                   interval=AUTO_VERIFY_INTERVAL, 
+                                   first=60)
+        print(f"✅ تم جدولة التحقق الآلي كل {AUTO_VERIFY_INTERVAL} ثانية")
+    
+    # Conversation Handler
     user_conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            ST_MAIN: [MessageHandler(user_text_filter, smart_router)],
-            ST_EISH_ACTION: [MessageHandler(user_text_filter, eish_choose_action)],
-            ST_E_USER: [MessageHandler(user_text_filter, eish_get_user)],
-            ST_E_PASS: [MessageHandler(user_text_filter, eish_get_pass)],
-            ST_BAL_MENU: [MessageHandler(user_text_filter, balance_menu)],
-            ST_TOPUP_METHOD: [MessageHandler(user_text_filter, topup_choose_method)],
-            ST_TOPUP_TXID: [MessageHandler(user_text_filter, topup_get_txid)],
-            ST_WITHDRAW_METHOD: [MessageHandler(user_text_filter, withdraw_choose_method)],
-            ST_WITHDRAW_NUMBER: [MessageHandler(user_text_filter, withdraw_get_number)],
-            ST_AMOUNT: [MessageHandler(user_text_filter, get_amount)],
-            ST_TOPUP_CODE: [MessageHandler(user_text_filter, topup_choose_code)],
-            ST_CONFIRM: [MessageHandler(user_text_filter, confirm)],
+            ST_MAIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, smart_router)],
+            ST_EISH_ACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u,c: ST_EISH_ACTION)],
+            ST_BAL_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, balance_menu)],
+            ST_TOPUP_METHOD: [MessageHandler(filters.TEXT & ~filters.COMMAND, topup_choose_method)],
+            ST_TOPUP_TXID: [MessageHandler(filters.TEXT & ~filters.COMMAND, topup_get_txid)],
+            ST_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_amount)],
+            ST_DUPLICATE_CHECK: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_duplicate_check)],
         },
-        fallbacks=[
-            CommandHandler("start", start),
-            MessageHandler(filters.Regex(f"^{BTN_BACK}$") & ~filters.User(ADMIN_ID), go_home),
-        ],
-        allow_reentry=True,
+        fallbacks=[CommandHandler("start", start)]
     )
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text), group=0)
-    app.add_handler(MessageHandler(filters.Document.ALL, admin_document), group=0)
-
-    app.add_handler(user_conv, group=1)
-
-    # Admin
-    app.add_handler(CommandHandler("admin", cmd_admin))
-
-    # ✅ نخلي admin_cb يستقبل فقط كولباكات الأدمن الخاصة
-    app.add_handler(CallbackQueryHandler(user_cb, pattern=r"^(EISH:|CP:|RF:)"))
-    app.add_handler(CallbackQueryHandler(admin_cb, pattern=r"^(AD:|OD:)"))
-
     
-    # (اختياري) حدث ترك القناة — يحتاج البوت أدمن بالقناة
-    app.add_handler(ChatMemberHandler(on_channel_member_update, ChatMemberHandler.CHAT_MEMBER))
-
+    app.add_handler(user_conv)
+    app.add_handler(CommandHandler("admin", cmd_admin))
+    app.add_handler(CommandHandler("checktx", check_transaction_command))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^AD:"))
+    
     return app
 
+# =========================
+# التشغيل الرئيسي
+# =========================
 def main():
-    if TOKEN == "PUT_YOUR_BOT_TOKEN_HERE" or not TOKEN.strip():
-        print("ضع توكن البوت داخل BOT_TOKEN (env) أو داخل TOKEN في الكود.")
-        return
+    print("=" * 50)
+    print("🚀 بدء تشغيل بوت التلغرام")
+    print(f"👑 السوبر أدمن: {SUPER_ADMIN_ID}")
+    print(f"📁 البيانات: {DATA_DIR}")
+    print(f"🤖 التحقق الآلي: {'✅ متاح' if SELENIUM_AVAILABLE else '❌ غير متاح'}")
+    print("=" * 50)
+    
+    # التحقق من بيانات سيرياتيل
+    syriatel_user = os.getenv("SYRIATEL_USERNAME", "")
+    syriatel_pass = os.getenv("SYRIATEL_PASSWORD", "")
+    
+    if syriatel_user and syriatel_pass:
+        print("✅ بيانات سيرياتيل موجودة (آمنة في Environment Variables)")
+    else:
+        print("⚠️ تحذير: بيانات سيرياتيل غير موجودة")
+        print("   أضف SYRIATEL_USERNAME و SYRIATEL_PASSWORD في Railway Variables")
+    
     app = build_app()
-    # Auto-backup schedule (hours)
-    if AUTO_BACKUP_HOURS and AUTO_BACKUP_HOURS > 0:
-        interval = max(3600, int(AUTO_BACKUP_HOURS * 3600))
-        try:
-            app.job_queue.run_repeating(auto_backup_job, interval=interval, first=interval)
-        except Exception as e:
-            print(f"تعذّر جدولة Auto Backup: {e}")
-    print("البوت يعمل الآن...")
-    app.run_polling()
+    
+    try:
+        app.run_polling(drop_pending_updates=True)
+    except KeyboardInterrupt:
+        print("\n🛑 إيقاف البوت...")
+        asyncio.run(stealth_login.close())
+    except Exception as e:
+        print(f"❌ خطأ: {e}")
+        asyncio.run(stealth_login.close())
 
 if __name__ == "__main__":
     main()
-
