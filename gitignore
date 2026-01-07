@@ -1,0 +1,14 @@
+data/
+*.pyc
+__pycache__/
+.env
+*.log
+chromedriver
+*.zip
+backups/
+.DS_Store
+venv/
+*.swp
+*.swo
+login_error_*.html
+transactions_test.html
